@@ -10,23 +10,23 @@ export default defineConfig({
   cleanUrls: true,
   themeConfig: {
     nav: [
-      { text: '更新日志', link: '/update-log' },
+      { text: '更新日志', link: '/update-logs/' },
       { text: '游戏文档', link: '/game-docs/' }
     ],
     sidebar: [
       {
         text: '更新日志',
-        link: '/update-log'
+        link: '/update-logs/',
       },
       {
         text: '游戏文档',
         link: '/game-docs/',
         items: [
-          { text: '联机教程', link: '/online_turtorial' },
-          { text: '第一章怪物情报', link: '/chapter1edx' },
-          { text: '存档系统使用指南', link: '/save_system_guide' },
-          { text: '植物系统重构指南', link: '/PLANT_REFACTOR_GUIDE' },
-          { text: '重制计划', link: '/milestone/01-overhaul' }
+          { text: '联机教程', link: '/game-docs/online_turtorial' },
+          { text: '第一章怪物情报', link: '/game-docs/chapter1edx' },
+          { text: '存档系统使用指南', link: '/game-docs/save_system_guide' },
+          { text: '植物系统重构指南', link: '/game-docs/PLANT_REFACTOR_GUIDE' },
+          { text: '重制计划', link: '/game-docs/milestone/01-overhaul' }
         ]
       }
     ],

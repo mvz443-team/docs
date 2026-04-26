@@ -4,6 +4,6 @@
 
 ## 文档入口
 
-- [更新日志](./update-log.md)
+- [更新日志](./update-logs/)
 - [游戏文档](./game-docs/)
 
