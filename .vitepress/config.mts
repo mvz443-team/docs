@@ -31,7 +31,7 @@ export default defineConfig({
       }
     ],
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/' }
+      { icon: 'github', link: 'https://github.com/mvz443-team/mvz443' }
     ],
     outline: {
       label: '页面目录'
