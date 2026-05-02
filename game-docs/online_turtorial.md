@@ -4,7 +4,11 @@
 
 每次游戏结束都需要重新创建房间
 
-## 连接公益服务器
+## <del>连接公益服务器</del>
+
+> [!IMPORTANT]
+> 
+> 由于成本问题，测试版本暂时停用了公益服务器，在此阶段参考下方自建服务器进行联机
 
 在服务器地址输入联机服务器地基础地址. 目前有一台部署在美国洛杉矶地和一台部署在枣庄的公益云服务器,将域名填写进服务器地址输入框 点击刷新即可查看
 
@@ -43,48 +47,171 @@
 
 ## 自建服务端
 
-[MVZ443/tools/server at main · scarletborder/MVZ443](https://github.com/scarletborder/MVZ443/tree/main/tools/server)
+[服务端软件发布页面](https://github.com/mvz443-team/mvz443-server/releases)
+
+服务端项目地址 [mvz443-server](https://github.com/mvz443-team/mvz443-server)
 
 ### 编译
 
-```cmd
-cd MVZ443/tools/server
-go build
+```bash
+go build -o mvzserver .
 ```
 
-### 部署
+也可以使用项目里的 Makefile：
 
 ```bash
-./mvzserver -h
-
-Usage of mvzserver:
-  -c /etc/letsencrypt/live/scarletborder.cn
-        启用自签名证书,例如 /etc/letsencrypt/live/scarletborder.cn
-  -p int
-        指定监听端口 (default 28080)
-  -s    启用通过 Let's Encrypt 自动管理证书
+make build
 ```
 
-本地开服使用`./mvzserver`就行了, 连接地址使用`127.0.0.1:28080`(或者`你的局域网地址:28080`)
+新版服务端不再把证书文件内联进二进制，也不需要编译前手动生成 `certs`。如果启动时没有指定证书目录，服务端会在二进制所在目录下创建 `certs` 文件夹，并生成 `ssl.cert` 和 `ssl.key`。
 
-
-
-部署到服务器使用
-
-#### 如果有独立IP 
+### 命令参数
 
 ```bash
-certbot certonly
-
-# 根据操作进行获取证书
-
-./mvzserver -c /etc/letsencrypt/live/scarletborder.cn
+./mvzserver -v
+./mvzserver -p 28080 -h 0.0.0.0
+./mvzserver --new-local-certs /path/to/store
+./mvzserver -c /etc/letsencrypt/live/scarletborder.cn -p 443
+./mvzserver -l /path/to/store -p 28080
 ```
 
-#### 如果没有独立IP
+参数说明：
+
+- `-v`：显示版本信息。
+- `-p str`：监听端口，默认 `28080`。
+- `-h str`：监听地址。不填写时监听所有地址；想明确允许局域网或公网访问，可以写 `0.0.0.0`。
+- `--new-local-certs /path/to/store`：在指定目录生成新的 `ssl.cert` 和 `ssl.key`，生成后退出。
+- `-c /path` 或 `--pem-certs /path`：使用包含 `cert.pem` 和 `privkey.pem` 的证书目录，适合 Certbot/Let's Encrypt。
+- `-l /path` 或 `--local-certs /path`：使用包含 `ssl.cert` 和 `ssl.key` 的目录；如果文件不存在，服务端会自动生成。
+
+注意：服务端始终使用 TLS 证书启动。使用自己生成的本地证书时，客户端可能需要手动信任证书；使用 Let's Encrypt 等受信任证书时通常不需要。
+
+### 家用电脑：同一台电脑联机
+
+如果客户端和服务端在同一台电脑上，直接启动：
 
 ```bash
-./mvzserver -p 28080 #这里28080可以是你可以开放的端口
+./mvzserver
 ```
 
-这种情况下,客户端需要手动信任证书
+客户端连接：
+
+```text
+127.0.0.1:28080
+```
+
+首次启动时会在 `mvzserver` 二进制旁边自动创建 `certs/ssl.cert` 和 `certs/ssl.key`。
+
+### 家用电脑：局域网联机
+
+适合几台电脑在同一个 Wi-Fi/路由器下联机。
+
+在开服电脑上启动：
+
+```bash
+./mvzserver -h 0.0.0.0 -p 28080
+```
+
+然后查看开服电脑的局域网 IP，例如：
+
+- Windows：`ipconfig`，查看 IPv4 地址，例如 `192.168.1.23`
+- Linux/macOS：`ip addr` 或 `ifconfig`
+
+同一局域网内的其他客户端连接：
+
+```text
+192.168.1.23:28080
+```
+
+如果连不上，通常需要检查系统防火墙是否允许 `mvzserver` 或 TCP `28080` 端口入站。
+
+### 家用电脑：端口映射联机
+
+适合朋友不在同一个局域网，但你想用家里的电脑开服。
+
+启动服务端：
+
+```bash
+./mvzserver -h 0.0.0.0 -p 28080
+```
+
+然后在路由器里添加端口映射/虚拟服务器/NAT 规则：
+
+```text
+外部 TCP 28080 -> 开服电脑局域网 IP 的 TCP 28080
+```
+
+例如：
+
+```text
+外部 TCP 28080 -> 192.168.1.23:28080
+```
+
+其他玩家连接你的公网 IP 或域名：
+
+```text
+你的公网IP:28080
+```
+
+如果运营商没有给你公网 IPv4，普通端口映射可能无效。这种情况可以尝试 IPv6、内网穿透、云服务器中转，或者直接使用有公网 IP 的专用服务器。
+
+### 专用服务器：有域名和受信任证书
+
+推荐给长期公开开服。先把域名解析到服务器 IP，然后用 Certbot 申请证书：
+
+```bash
+sudo certbot certonly
+```
+
+证书目录一般类似：
+
+```text
+/etc/letsencrypt/live/example.com
+```
+
+启动服务端：
+
+```bash
+sudo ./mvzserver -h 0.0.0.0 -p 443 -c /etc/letsencrypt/live/example.com
+```
+
+玩家连接：
+
+```text
+example.com:443
+```
+
+如果不想占用 443，也可以使用其他开放端口：
+
+```bash
+./mvzserver -h 0.0.0.0 -p 28080 -c /etc/letsencrypt/live/example.com
+```
+
+玩家连接：
+
+```text
+example.com:28080
+```
+
+### 专用服务器：没有域名或暂时不用正式证书
+
+可以直接让服务端生成本地证书：
+
+```bash
+./mvzserver -h 0.0.0.0 -p 28080
+```
+
+或者把证书固定放到你指定的位置：
+
+```bash
+./mvzserver --new-local-certs /opt/mvzserver/certs
+./mvzserver -h 0.0.0.0 -p 28080 -l /opt/mvzserver/certs
+```
+
+玩家连接：
+
+```text
+服务器IP:28080
+```
+
+这种方式使用的是自生成证书，客户端需要信任该证书后才能正常连接。
