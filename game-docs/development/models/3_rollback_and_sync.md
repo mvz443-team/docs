@@ -144,7 +144,7 @@ syncViewFromModel
 
 - 每个 Model 一个实例。
 - timer 只存纯数据。
-- 到点派发 `TickEventNameEnums` 给 `LogicModel.handleTickEvent()`。
+- 到点派发事件名（框架事件或 preset 本地事件）给 `LogicModel.handleTickEvent()`。
 - 不依赖全局工厂，重建实体后也能按 `kind + args` 恢复。
 
 规则：实体技能不得使用 `scene.time.delayedCall()`；全局 TickerManager 不用于实体技能。

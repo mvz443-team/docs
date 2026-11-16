@@ -151,7 +151,7 @@ export class SomeMonsterEntity extends BaseMonsterEntity {
 
 ```ts
 public readonly tickmanager!: ITickManagerProxy;
-public readonly tickEventNames!: readonly TickEventNameEnums[];
+public readonly tickEventNames!: readonly string[];
 public readonly host!: ModelHost | null;
 ```
 
@@ -160,35 +160,40 @@ public readonly host!: ModelHost | null;
 - timer 只存 `id / eventName / targetFrame / repeat / interval / group / args` 纯数据。
 - 回调按函数身份注册到稳定事件表，不进入 timer 状态。
 - 回滚不会重新创建函数对象，也不会产生“幽灵回调”。
-- 推荐用枚举事件注册，而不是传箭头函数。
+- 公共 `TickEventNameEnums` 只保留框架级事件（`TimerTriggered`、`LogicTick`）；单位专属事件由各自 preset 文件定义本地常量。
 
 推荐写法：
 
 ```ts
+const EVOKER_EVENTS = {
+  Summon: "EvokerSummon",
+  Resume: "EvokerResume",
+} as const;
+
 export class EvokerModel extends PresetMonsterModel {
-  public override readonly tickEventNames = [
+  public override readonly tickEventNames: readonly string[] = [
     ...DEFAULT_TICK_EVENT_NAMES,
-    TickEventNameEnums.EvokerSummon,
-    TickEventNameEnums.EvokerResume,
+    EVOKER_EVENTS.Summon,
+    EVOKER_EVENTS.Resume,
   ];
 
   public override onCreate(entity: MonsterEntity): void {
-    this.tickmanager.schedule(TickEventNameEnums.EvokerSummon, 28000, {
+    this.tickmanager.schedule(EVOKER_EVENTS.Summon, 28000, {
       startAt: 24000,
       repeat: 3,
     });
   }
 
   public override handleTickEvent(
-    eventName: TickEventNameEnums | string,
+    eventName: string,
     args: JsonValue = null,
     timerId?: number,
   ): void {
-    if (eventName === TickEventNameEnums.EvokerSummon) {
+    if (eventName === EVOKER_EVENTS.Summon) {
       this.summonVindicator(this.host as MonsterEntity | null);
       return;
     }
-    if (eventName === TickEventNameEnums.EvokerResume) {
+    if (eventName === EVOKER_EVENTS.Resume) {
       this.resumeAfterSummon(this.host as MonsterEntity | null);
       return;
     }

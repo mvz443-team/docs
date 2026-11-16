@@ -63,18 +63,22 @@ MobManager 波次定时器到点
 骨骼：
 
 ```ts
+const MY_MONSTER_EVENTS = {
+  Skill: "MyMonsterSkill",
+} as const;
+
 export class MyMonsterModel extends PresetMonsterModel {
-  public override readonly tickEventNames = [
+  public override readonly tickEventNames: readonly string[] = [
     ...DEFAULT_TICK_EVENT_NAMES,
-    TickEventNameEnums.MySkill,
+    MY_MONSTER_EVENTS.Skill,
   ];
 
   public override onCreate(entity: MonsterEntity): void {
-    this.tickmanager.schedule(TickEventNameEnums.MySkill, 3000, { repeat: 2 });
+    this.tickmanager.schedule(MY_MONSTER_EVENTS.Skill, 3000, { repeat: 2 });
   }
 
   public override handleTickEvent(eventName, args = null, timerId?): void {
-    if (eventName === TickEventNameEnums.MySkill) {
+    if (eventName === MY_MONSTER_EVENTS.Skill) {
       const entity = this.host as MyMonsterEntity | null;
       if (!entity || entity.currentHealth <= 0) return;
       entity.playMySkillAnim();
@@ -149,7 +153,7 @@ Rapier collision
 `MonsterModel.beginAttackTimer()` 注册：
 
 ```ts
-this.tickmanager.schedule(TickEventNameEnums.MonsterAttack, intervalMs, { loop: true });
+this.tickmanager.schedule(MONSTER_EVENTS.Attack, intervalMs, { loop: true });
 ```
 
 到点后由 `MonsterModel.handleTickEvent()` 调用 `hurtTarget()`：
@@ -186,14 +190,14 @@ startMove()
 
 ## 6. 事件驱动技能定时器
 
-所有技能 timer 走 `TickEventNameEnums`，例如：
+公共 `TickEventNameEnums` 只保留框架级事件。所有单位技能事件由各自的 preset 文件定义本地常量，例如：
 
 ```text
-EvokerSummon / EvokerResume
-GolemBegin → GolemCast → GolemArmStop → GolemReposition → GolemSummonNext
-WardenLand / WardenReposition
-ObsidianColumn / ObsidianObstacleSpawn / ObsidianReposition
-CentipedeSpawn / CentipedeCycle / CentipedeDisappear / ...
+Evoker: EvokerSummon / EvokerResume
+Golem: GolemBegin → GolemCast → GolemArmStop → GolemReposition → GolemSummonNext
+Warden: WardenLand / WardenReposition
+Obsidian Golem: ObsidianColumn / ObsidianObstacleSpawn / ObsidianReposition
+Centipede: CentipedeSpawn / CentipedeCycle / CentipedeDisappear / ...
 ```
 
 不要在 Entity 中写：
@@ -205,7 +209,11 @@ this.scene.time.delayedCall(1000, () => this.skill());
 而应在 Model 中写：
 
 ```ts
-this.tickmanager.schedule(TickEventNameEnums.WardenLand, 1000);
+const WARDEN_EVENTS = {
+  Land: "WardenLand",
+} as const;
+
+this.tickmanager.schedule(WARDEN_EVENTS.Land, 1000);
 ```
 
 Entity 只提供 `playWardenLand()` 等表现入口。
