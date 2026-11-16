@@ -45,7 +45,7 @@ PlantsManager.TryPlant
 
 `PlantModel` 负责：
 
-- 静态数值：`maxHealth / cost / cooldown / damage`，通常用 `PlantStat`。
+- 静态数值：`maxHealth / cost / cooldown / damage`，通常用 `LevelScaledValue`。
 - 运行时状态：`level / isSleeping / shieldHealth / damagedSum / inBruteShoot / fuse / hasExploded` 等。
 - 攻击时序：用 `this.tickmanager.schedule()` 或兼容的 `delayedCall()`。
 - 目标判定：读取 SightLine 查询结果，决定是否攻击。
@@ -61,11 +61,11 @@ export class MyPlantModel extends PlantModel {
   public override descriptionKey = "my_plant_description";
   public override texturePath = "plant/my_plant";
 
-  public maxHealth = new PlantStat(300);
-  public cost = new PlantStat(100);
-  public cooldown = new PlantStat(5000);
+  public maxHealth = new LevelScaledValue(300);
+  public cost = new LevelScaledValue(100);
+  public cooldown = new LevelScaledValue(5000);
   public cooldownStartAtRatio = 0;
-  public damage = new PlantStat(20);
+  public damage = new LevelScaledValue(20);
   public isNightPlant = false;
 
   public override createEntity(scene, col, row, level): MyPlantEntity {

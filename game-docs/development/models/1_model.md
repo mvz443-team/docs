@@ -128,9 +128,9 @@ export class CounterPlantModel extends PlantModel {
 
 - 函数
 - `Map` / `Set` / class instance
-- `PlantStat`、`Phaser.Sprite`、`RAPIER.RigidBody`
+- `LevelScaledValue`、`Phaser.Sprite`、`RAPIER.RigidBody`
 
-类实例配置（如 `PlantStat`、工厂函数）不会进入 `flags.model`，也不要运行时改写。`EquipmentDef` 是 JSON 安全的纯对象，会随 Model 快照保存；这是为了让回滚后仍能知道护盾/武器的配置与当前状态。
+类实例配置（如 `LevelScaledValue`、工厂函数）不会进入 `flags.model`，也不要运行时改写。`EquipmentDef` 是 JSON 安全的纯对象，会随 Model 快照保存；这是为了让回滚后仍能知道护盾/武器的配置与当前状态。
 
 ### 字段命名注意
 
