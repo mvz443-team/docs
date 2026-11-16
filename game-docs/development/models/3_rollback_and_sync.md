@@ -396,6 +396,7 @@ CombatManager.sampleStateHash（每 20 帧）
 3. 服务端回包的 `InGameOperation.response_client_op_seq` 把权威操作关联到发起者；确认时只清理预测记录，不重复执行。
 4. 服务端 `error` 回包按 `client_op_seq` 撤销预测：清虚影、删预测记录、恢复到操作前快照并重新执行后续已确认操作。
 5. 因此回滚现在有真实用途：拒绝回包、分叉止损和 checkpoint 恢复都依赖同一套确定性快照机制。
+6. 拒绝回包回滚时同时清空资源预演值与卡槽预演冷却，再按 `clientOpSeq` 顺序重放尚未确认的预测，避免 UI 显示与权威 Model 不一致。
 
 高频 10 帧采样只写逻辑状态；`registerPhysics().capture` 返回 null，不再对 Rapier world 做 `takeSnapshot()`。
 
@@ -408,6 +409,7 @@ CombatManager.sampleStateHash（每 20 帧）
 3. `SyncManager.update()` 在离线单机模式下自行推进 `currentFrameId`，本地操作直接落到 Model。
 4. 暂停与倍速恢复可用；收益和星屑消耗按正常单机规则继续。
 5. 左上角显示 `desync`；结算时 `Game.handleRoomGameEnd()` 调用 `exportDesyncLog()` 下载一次 JSON 报告。
+6. 分叉态下 `BackendWS.isOnlineMode()` 返回 false，因此 HUD、暂停按钮、键盘快捷键和结算流程都不会再按在线模式拦截本地操作；日志导出有一次性标记，重复结算不会重复下载。
 
 分叉本身说明确定性设计存在缺陷，因此系统不尝试多人 resync；离线单机只是止损，不是把它重新合并回多人对局。
 
@@ -417,7 +419,9 @@ CombatManager.sampleStateHash（每 20 帧）
 - 每 200 帧（默认 10 秒）构造一次 checkpoint：不含 `physics`，体积超过 6KB 时只上报 hash。
 - `RequestBlank.state_hash_hex` 传 8 位十六进制摘要，`inline_snapshot_json` 传可恢复状态；服务端只在双端 hash 一致时确认 `LastCheckpointFrame`。
 - `ResponseCheckpointAccepted` 通知两端 checkpoint 已生效。
-- 重连后服务端发送 `ResponseReplayFrames`，包含从 `LastCheckpointFrame + 1` 到当前权威帧的所有历史操作；客户端按 ACK 快进消费，期间新帧仍通过原有 `InGameResponse` 通道到达。
+- 回放期间的权威操作先检查本地预测表：预测存在时只确认并清理；刷新/进程重建后预测表为空时，自己的历史权威操作也必须照常落地，避免快进漏掉操作。
+- 重连后服务端发送 `ResponseReplayFrames`，包含从 `LastCheckpointFrame + 1` 到当前权威帧的所有历史操作，以及 `checkpoint_frame_id` 和已确认 checkpoint 的 `inline_snapshot_json`；客户端先用 `restoreInlineSnapshot()` 在 `rebuild` 模式恢复逻辑状态与 `currentFrameId`，再按 ACK 快进消费帧，期间新帧仍通过原有 `InGameResponse` 通道到达。
+- `captureCheckpoint()` 上报的 `state_hash_hex` 固定为 8 位十六进制，和 32 位摘要心跳复用同一编码，避免双端以不同字符串格式上报导致 checkpoint 永远无法确认。
 - 没有可用 checkpoint 时回退到最早历史帧；缺口仍无法覆盖时继续按 `RoomClosed` 要求重新加入。
 
 ### 14.3 回滚确定性
@@ -431,8 +435,10 @@ CombatManager.sampleStateHash（每 20 帧）
 
 - 核心测试：29/29 通过。
 - EntityTickManager 回滚专项：1/1 通过。
-- inline 快照专项：2/2 通过。
+- inline 快照专项：3/3 通过（含 inline → SimulationState 恢复）。
+- TypeScript 类型检查：`npx tsc --noEmit -p tsconfig.json` 无错误。
 - Go `room-atom` 与 `game-logic`：通过，含 checkpoint 双端确认/摘要不一致用例。
 - 客户端生产构建：成功。
+- 回放快照专项：Go 测试验证已确认 checkpoint 的 inline 正文随 replay 返回。
 
 旧的 11.4 节记录的是修复前状态；以本节和对应提交为准。
