@@ -6,7 +6,9 @@
 >
 > 相关阅读：[Model 快照职责](./1_model.md#model-rollback)、[Entity 快照职责](./2_entity.md#entity-rollback)、[Manager 状态源](../kit/1_manager.md#5-manager-与状态快照)
 
-> 2026-11-16 复查补充：本文区分三件事——**服务端权威帧同步**、**客户端确定性模拟**、**客户端本地回滚/恢复**。服务端不保存、不比较完整战局状态，也不下发状态快照；所谓“回滚恢复”均发生在客户端进程内，服务端只提供输入帧、ACK 补发、开局配置、状态摘要告警和重连后的帧续传。
+> 2026-11-16 复查补充：本文区分三件事——**服务端权威帧同步**、**客户端确定性模拟**、**客户端本地回滚/恢复**。服务端不保存、不比较完整战局状态，也不生成权威状态快照；所谓“回滚恢复”均发生在客户端进程内，服务端只提供输入帧、ACK 补发、开局配置、状态摘要告警和重连后的帧续传。
+>
+> 2026-11-18 更新：页面刷新这类“本地状态完全丢失”的重连已补充两条恢复路径——服务端在 `AllReady` 中持久化载荷（`room_id/chapter_id/stage_id` 与双方 `loadout`）供客户端重建 `GameParams`；在已确认 checkpoint 不可用时，服务端向延迟最低的在线玩家索取一次兜底快照，再连同快照帧到当前权威帧之间的操作转发给重连客户端（见 [§9.3](#history-gap-and-reconnect)）。服务端仍不保存该快照。
 
 > 2026-11-16 更新：已按“预测式帧同步 + 可恢复回滚”的目标调整实现：
 > 1. 分叉不再只报不修；客户端进入不可恢复的离线单机模式，恢复暂停/倍速与正常收益，并在结算时下载一次 Desync 日志。
@@ -218,7 +220,7 @@ Entity 用 `consumeLogicEvents()` 按 `eventId` 去重消费；回滚时队列�
 - 比较两端上报的 32 位状态摘要，只记录“分叉已发生”，不修复分叉。
 - 收集 `EndGame` 投票，把统一结果写入权威结束帧，并广播带 `endFrameId` 的 `GameEnd`。
 
-服务端不模拟怪物/植物/投射物，不保存实体血量、位置、Rapier world，也不向客户端发送状态快照。`InGameResponse` 只携带帧号和该帧操作。
+服务端不模拟怪物/植物/投射物，不保存实体血量、位置、Rapier world，也不生成权威状态快照。`InGameResponse` 只携带帧号和该帧操作。唯一的例外是重连兜底：服务端会向在线客户端**索取**一份快照并原样转发，但不会把它写入房间状态或用于服务端校验。
 
 ### 8.2 客户端职责
 
@@ -273,11 +275,23 @@ Entity 用 `consumeLogicEvents()` 按 `eventId` 去重消费；回滚时队列�
 
 ### 9.3 历史帧缺口与重连
 
+<a id="history-gap-and-reconnect"></a>
+
 `syncClientFrames()` 只从 `max(lastAck+1, LastSynced+1)` 开始补发；若该起点早于最早历史帧且中间确有缺口，服务端调用 `notifyResyncGap()` 单播 `RoomClosed`，客户端按“重新加入房间”处理，而不是跳过缺失帧。
 
 InGame 掉线时服务端保留玩家席位并标记 `PlayerStateDisconnected`，连接代数递增以确保旧读循环不会误注销新连接。客户端 `BackendWS` 保持本地战局，按 300ms 起的指数退避最多尝试 12 次重连；重连地址带 `id/key/reconnect=1/my_id`。重连成功后服务端不回 `JoinRoomSuccess`，客户端立即用当前帧/ACK 发一个 blank，触发断点补帧。超过历史窗口或超时会明确回到大厅。
 
-注意：重连目前恢复的是**帧进度和传输通道**，不是从服务端下发状态快照。客户端仍依赖本地 `CombatManager.snapshotRing`、实体对账和确定性重放恢复视图与逻辑状态。
+页面刷新会丢失整个进程，因此不能只靠本地快照环。重连路径额外做了两层恢复：
+
+1. **服务端持久化开局载荷。** `Room` 在开局时保存双方的规范化 `loadout`，`ResponseAllReady` 携带 `room_id/chapter_id/stage_id`。刷新后的客户端即使本地 `GameParams` 为空，也能在点击“重连”后重建 `GameParams`（关卡、卡组、金币、设置），先进入 Preloader/Game 场景再挂载 Phaser，不再触发 `no game params`。
+2. **向在线玩家索取兜底快照。** checkpoint 依赖双端摘要一致且每 200 帧才产生一次，刷新后可能没有可用或足够新的 inline checkpoint。服务端在重连时先照常发送 `sendReplayFromCheckpoint` + 历史帧，同时调用 `requestReconnectSnapshot()`：
+   - 用 `selectSnapshotProvider()` 选出仍 `Connected`、且 `ReportedLatencyMs`（`RequestBlank.client_latency_ms`）最低的玩家；未上报延迟的玩家排最后；重连目标自身不参与。
+   - 向该玩家单播 `ResponseSnapshotRequest{request_id, target_player_id}`，并登记 2 秒超时（`tickPendingRecoveries`）。
+   - 在线客户端 `CombatManager` 收到 `PhaserEvents.SnapshotRequested` 后调用 `captureCheckpoint()`，用 `RequestSnapshotResponse{request_id, frame_id, inline_snapshot_json}` 上传最近权威帧快照。
+   - 服务端校验快照大小/JSON/帧号，并确认 `frameHistory` 中 `frame_id+1 .. currentServerFrameID()` **完全连续**后，才用 `ResponseReplayFrames`（`checkpoint_frame_id = 快照帧`）把快照与这些操作一起转发给重连客户端；缺帧时丢弃快照，保留先前的 checkpoint/历史帧兜底，避免制造新的断档。
+   - 快照仍是**另一客户端的视角**，不是服务端权威状态；服务端只做转发与校验，不保存。
+
+注意：如果房间内没有其他在线玩家，或快照请求超时，重连仍只恢复**帧进度和传输通道**，客户端依赖本地 `CombatManager.snapshotRing`（若进程仍在）或已发送的 checkpoint inline 快照、实体对账和确定性重放恢复视图与逻辑状态。
 
 <a id="cross-client-hash"></a>
 
@@ -335,9 +349,9 @@ CombatManager.sampleStateHash（每 20 帧）
 
 ### 11.4 尚未闭合的恢复需求
 
-- 服务端没有权威战局快照，无法把严重分叉的客户端“纠正”到正确世界。
+- 服务端没有自生成的权威战局快照，无法把严重分叉的客户端“纠正”到正确世界；重连兜底快照来自另一个客户端，其自身若已分叉也会被一并继承。
 - 客户端没有 `resync` 消息，也没有把 `RoomError("状态分叉")` 映射到回滚/自检/重连的自动策略。
-- 重连只恢复帧进度；若本地快照环已失效或本地状态已污染，仍可能继续分叉。
+- 重连在无在线同伴、快照请求超时或 `frameHistory` 不连续时只恢复帧进度；若本地快照环已失效或本地状态已污染，仍可能继续分叉。
 - `BaseEntity.lastConsumedEventId` 是 Entity 私有字段；目前未见于 `captureLogicState()/restoreLogicState()`，回滚重建实体后一次性事件ID可能从头开始。
 - `CombatManager.restoreState()` 未检查 `RestoreReport.ok/missing/errors`，恢复失败不会阻止继续模拟。
 - `EntityTickManager.restore()` 用 `Math.max(nextTimerId, snapshot ids + 1)`，通常不会把 `nextTimerId` 回退到快照时的值；若回滚删除了高ID timer，后续新 timer 的 ID 可能与连续运行不同。
@@ -361,6 +375,7 @@ CombatManager.sampleStateHash（每 20 帧）
 
 - `desync_test.go`：一端上报不判定、两端一致不判定、两端同帧不同哈希判定分叉；摘要表有界。
 - `reconnect_test.go`：重连保留 `LatestFrameID/LatestAckFrameID`、连接代数递增，错误密钥/非 InGame 拒绝。
+- `recovery_snapshot_test.go`：快照来源按上报延迟选最低、排除重连目标与断线席位；快照帧之后历史帧必须连续才转发；超时请求被清理。
 - `endgame_test.go`：双端投票、结果冲突判负、重复投票幂等。
 
 ### 12.3 多会话全链路模拟
