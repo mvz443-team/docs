@@ -14,7 +14,7 @@
 > 3. 高频 10 帧采样只上报轻量摘要，checkpoint 的 inline 快照不含 Rapier physics，超过 6KB 自动退化为纯 hash。
 > 4. 新增左上角网络状态 HUD：`offline` / `retry(n)` / `desync` / 延迟 ms。
 > 5. 回滚确定性缺口（timer ID、事件游标、恢复报告、ACK 语义）已修复并纳入测试。
-> 6. 权威模式已从“只放虚影”改为“本地预测 + 权威确认/拒绝回滚”；高频状态采样不再序列化 Rapier physics。
+> 6. 权威模式采用“表现层预测 + 权威帧落地”：本地只放虚影/预演 HUD，Model 实体与资源只由权威帧改变；高频状态采样不再序列化 Rapier physics。
 
 ## 1. 设计目标
 
@@ -57,7 +57,7 @@ interface SimulationState {
 seed / frame
 combat.dayOrNight / isGameEnd / isPaused
 ticker.currentFrame / nextTimerId / frameInterval
-resources / cardpile / wave / waves / mob.spawn
+resources / wave / waves / mob.spawn
 tileitem / grid / logic.events
 ticker timers / mob.alea PRNG
 entities: mob / plant / obstacle / projectile
@@ -65,6 +65,10 @@ physics snapshot
 ```
 
 新增会影响战斗结果的系统时，必须注册对应状态源；纯表现数据不要注册。
+
+`cardpile` 通过 `registerLocalValue()` 注册：它只保存本机卡组与冷却，两端卡组天然不同，
+因此会进入本地快照用于回滚，但不参与跨端一致性哈希。若误用 `registerValue()`，
+首个 20 帧采样点就会误报分叉。
 
 <a id="rollback-model"></a>
 
@@ -210,6 +214,7 @@ Entity 用 `consumeLogicEvents()` 按 `eventId` 去重消费；回滚时队列�
 - 对种植、铲除、星屑做轻量校验：格子范围、同帧同格冲突、成本上下界、自报资源非负。
 - 按固定规则排序同一帧操作并编号，写入 `frameHistory`。
 - 根据每个玩家的 `ackFrameId` 补发历史帧；全部 ACK 或超过 600 帧后裁剪历史。
+- 校验心跳里的 `stateHashVersion`；新旧客户端混用时广播“客户端版本不一致”并停止哈希比较，避免误报分叉。
 - 比较两端上报的 32 位状态摘要，只记录“分叉已发生”，不修复分叉。
 - 收集 `EndGame` 投票，把统一结果写入权威结束帧，并广播带 `endFrameId` 的 `GameEnd`。
 
@@ -222,6 +227,7 @@ Entity 用 `consumeLogicEvents()` 按 `eventId` 去重消费；回滚时队列�
 - 本地根据服务端下的 `seed`、`stageId`、规范化 `loadout` 和权威操作序列运行确定性战斗模拟。
 - 本地操作先进入 `QueueSend`，不会立刻改变权威世界；种植有仅表现层的半透明虚影，服务端确认或拒绝后移除。
 - 心跳、ACK、资源/状态摘要通过 `RequestBlank` 上报；操作通过 `RequestCardPlant/RequestRemovePlant/RequestStarShards` 上报。
+- `RequestBlank.stateHashVersion` 必须等于 `SIMULATION_STATE_VERSION`；改动哈希口径时必须同步递增，否则旧客户端会被明确拒绝。
 - 服务端帧缺失时暂停固定步，显示等待文本并发送 `ensureBlankFrame()`；历史帧缺口不可补时服务端单播 `RoomClosed` 要求重新加入。
 
 ### 8.3 一条操作穿过系统的顺序
@@ -389,14 +395,14 @@ CombatManager.sampleStateHash（每 20 帧）
 
 ### 14.0 预测式帧同步
 
-权威模式下本地操作不再等待服务端帧才落地：
+权威模式下本地操作只做表现层反馈，不改动 Model：
 
 1. 玩家操作时记录 `PredictedOperation{clientOpSeq, uid, kind, pid, col, row}`。
-2. 操作立即调用现有 `PlantsManager` 路径改变本地 Model，同时进入预测表并保存到操作前快照。
-3. 服务端回包的 `InGameOperation.response_client_op_seq` 把权威操作关联到发起者；确认时只清理预测记录，不重复执行。
-4. 服务端 `error` 回包按 `client_op_seq` 撤销预测：清虚影、删预测记录、恢复到操作前快照并重新执行后续已确认操作。
-5. 因此回滚现在有真实用途：拒绝回包、分叉止损和 checkpoint 恢复都依赖同一套确定性快照机制。
-6. 拒绝回包回滚时同时清空资源预演值与卡槽预演冷却，再按 `clientOpSeq` 顺序重放尚未确认的预测，避免 UI 显示与权威 Model 不一致。
+2. 种植只生成半透明虚影，并预演 HUD 能量与卡槽冷却；**不创建 Model 实体、不扣权威资源**。
+3. 服务端回包的 `InGameOperation.response_client_op_seq` 把权威操作关联到发起者；确认时只清理虚影与预测记录。
+4. 无论是否命中本地预测，`cardPlant / removePlant / useStarShards` 都由权威帧调用一次 `PlantsManager` 落地，保证两端实体创建帧、计时器起始帧和 PRNG/事件序号完全一致。
+5. 服务端 `error` 回包按 `client_op_seq` 清虚影、删预测记录并清空资源/卡槽预演值；Model 从未被本地预测改动，因此不需要回滚重放。
+6. 这条边界是强制的：预测可以影响表现，不能提前改变确定性 Model。否则本地预测端会比远端早若干帧推进实体计时器，首次操作后必然分叉。
 
 高频 10 帧采样只写逻辑状态；`registerPhysics().capture` 返回 null，不再对 Rapier world 做 `takeSnapshot()`。
 
@@ -419,7 +425,7 @@ CombatManager.sampleStateHash（每 20 帧）
 - 每 200 帧（默认 10 秒）构造一次 checkpoint：不含 `physics`，体积超过 6KB 时只上报 hash。
 - `RequestBlank.state_hash_hex` 传 8 位十六进制摘要，`inline_snapshot_json` 传可恢复状态；服务端只在双端 hash 一致时确认 `LastCheckpointFrame`。
 - `ResponseCheckpointAccepted` 通知两端 checkpoint 已生效。
-- 回放期间的权威操作先检查本地预测表：预测存在时只确认并清理；刷新/进程重建后预测表为空时，自己的历史权威操作也必须照常落地，避免快进漏掉操作。
+- 回放期间的权威操作与正常帧一致：先按 `response_client_op_seq` 确认并清理本地虚影/HUD 预测，然后**无条件落地一次** Model 变更。刷新/进程重建后预测表为空时同样落地，避免快进漏掉操作。
 - 重连后服务端发送 `ResponseReplayFrames`，包含从 `LastCheckpointFrame + 1` 到当前权威帧的所有历史操作，以及 `checkpoint_frame_id` 和已确认 checkpoint 的 `inline_snapshot_json`；客户端先用 `restoreInlineSnapshot()` 在 `rebuild` 模式恢复逻辑状态与 `currentFrameId`，再按 ACK 快进消费帧，期间新帧仍通过原有 `InGameResponse` 通道到达。
 - `captureCheckpoint()` 上报的 `state_hash_hex` 固定为 8 位十六进制，和 32 位摘要心跳复用同一编码，避免双端以不同字符串格式上报导致 checkpoint 永远无法确认。
 - 没有可用 checkpoint 时回退到最早历史帧；缺口仍无法覆盖时继续按 `RoomClosed` 要求重新加入。
@@ -427,7 +433,7 @@ CombatManager.sampleStateHash（每 20 帧）
 ### 14.3 回滚确定性
 
 - `RestoreContext.nextTimerId` 来自快照中的 `ticker.nextTimerId`，`EntityTickManager.restore()` 精确回退。
-- `BaseEntity.lastConsumedEventId` 进入 `extra`，重建实体不会重复消费一次性事件。
+- `BaseEntity.lastConsumedEventId` 进入 `extra`，重建实体不会重复消费一次性事件；它和物理句柄、`logic.events` 一样只用于本机恢复/表现，不参与跨端哈希。
 - `CombatManager.restoreState()` 保存并告警 `RestoreReport.ok/missing/errors`。
 - 状态摘要心跳使用当前 `frameId` + 摘要专用 `hashFrameId`，避免污染 ACK 与补发边界。
 
