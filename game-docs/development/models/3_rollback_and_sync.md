@@ -8,7 +8,7 @@
 
 > 2026-11-16 复查补充：本文区分三件事——**服务端权威帧同步**、**客户端确定性模拟**、**客户端本地回滚/恢复**。服务端不保存、不比较完整战局状态，也不生成权威状态快照；所谓“回滚恢复”均发生在客户端进程内，服务端只提供输入帧、ACK 补发、开局配置、状态摘要告警和重连后的帧续传。
 >
-> 2026-11-18 更新：页面刷新这类“本地状态完全丢失”的重连已补充两条恢复路径——服务端在 `AllReady` 中持久化载荷（`room_id/chapter_id/stage_id` 与双方 `loadout`）供客户端重建 `GameParams`；在已确认 checkpoint 不可用时，服务端向延迟最低的在线玩家索取一次兜底快照，再连同快照帧到当前权威帧之间的操作转发给重连客户端（见 [§9.3](#history-gap-and-reconnect)）。服务端仍不保存该快照。
+> 2026-11-18 更新：页面刷新这类“本地状态完全丢失”的重连已补充两条恢复路径——服务端在 `AllReady` 中持久化载荷（`room_id/chapter_id/stage_id` 与双方 `loadout`）供客户端重建 `GameParams`；在已确认 checkpoint 不可用时，服务端向延迟最低的在线玩家索取一次兜底快照，再连同快照帧到当前权威帧之间的操作转发给重连客户端（见 [§9.3](#history-gap-and-reconnect)）。服务端仍不保存该快照。2026-11-19 追加第三条兜底：客户端每帧 blank 心跳上报 `energy/star_shards/card_cooldowns` 资源 profile，服务端按玩家保存并在重连 `AllReady` 中回传；客户端只在本地帧号追上 profile 帧号时套用，跳帧恢复（checkpoint/快照）后直接丢弃，避免重演期资源叠加造成摘要分叉。
 
 > 2026-11-16 更新：已按“预测式帧同步 + 可恢复回滚”的目标调整实现：
 > 1. 分叉不再只报不修；客户端进入不可恢复的离线单机模式，恢复暂停/倍速与正常收益，并在结算时下载一次 Desync 日志。
@@ -290,6 +290,13 @@ InGame 掉线时服务端保留玩家席位并标记 `PlayerStateDisconnected`�
    - 在线客户端 `CombatManager` 收到 `PhaserEvents.SnapshotRequested` 后调用 `captureCheckpoint()`，用 `RequestSnapshotResponse{request_id, frame_id, inline_snapshot_json}` 上传最近权威帧快照。
    - 服务端校验快照大小/JSON/帧号，并确认 `frameHistory` 中 `frame_id+1 .. currentServerFrameID()` **完全连续**后，才用 `ResponseReplayFrames`（`checkpoint_frame_id = 快照帧`）把快照与这些操作一起转发给重连客户端；缺帧时丢弃快照，保留先前的 checkpoint/历史帧兜底，避免制造新的断档。
    - 快照仍是**另一客户端的视角**，不是服务端权威状态；服务端只做转发与校验，不保存。
+3. **每帧上报资源 profile，作为快照之外的兜底。** 客户端每次发送 blank 心跳时附带本机资源 profile（`RequestBlank.energy / star_shards / card_cooldowns / resources_reported`，见 `common.proto` 的 `PlayerResourceState`），服务端按玩家保存最近一份副本（`Room.resourceProfiles`）。重连时 `ResponseAllReady.resources` 带回全员 profile，客户端据此恢复能量、星之碎片与卡槽冷却。
+   - 客户端**不能在 AllReady 到达时立即套用**：刷新后可能要从帧 1 重演，profile 记录的是断开时的终态，提前覆盖会让重演期间的资源叠加/冷却时序与在线端分叉。`ResourceManager` / `CardpileManager` 只登记 pending，等在固定步里本地 `recvQueue.currentFrameId` 追上 `profile.frame_id` 再套用（`PROFILE_APPLY_WINDOW_FRAMES = 8`）。
+   - 若本地帧号在登记时已经越过 profile 帧号，或追帧时落后超过窗口，说明状态来自 checkpoint/备用快照，那份状态比 profile 更权威，直接丢弃 profile。
+   - 旧客户端不置 `resources_reported`，服务端不会用零值心跳覆盖已有 profile；`Room.Reset()` 清空 profile，避免上一局的资源泄漏到下一局。
+
+此外，备用快照恢复暴露过一个恢复不全的 bug：`TileItemManager.RestoreTileItemState()` 曾用 `Number(state.currentWaveId) || -1` 把合法的 wave 0 当成缺省值恢复成 -1，导致重连客户端在首个 20 帧摘要采样点与在线端分叉并进入 desync 离线模式（表现为能量不恢复、冷却条不动）。恢复逻辑必须用 `Number.isFinite` 判断“字段缺失”，不能用 `||` 把 0 当缺省。
+
 
 注意：如果房间内没有其他在线玩家，或快照请求超时，重连仍只恢复**帧进度和传输通道**，客户端依赖本地 `CombatManager.snapshotRing`（若进程仍在）或已发送的 checkpoint inline 快照、实体对账和确定性重放恢复视图与逻辑状态。
 
