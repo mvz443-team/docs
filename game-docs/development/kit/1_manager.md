@@ -38,6 +38,8 @@ CombatManager → CardpileManager → CursorManager → DeferredManager
 
 `SoundManager` 会在 preload 阶段提前初始化，其余 Manager 由 `Game.create()` 统一 `setScene()` + `Load()`。
 
+对局拆除走 `Game.teardownSession()`（幂等）：先卸载全局引用与 UI/输入/声音，再调用 `ProjectileCmd.clearProjectiles(this)` 清投射物模块级注册表，最后只对仍绑定本场景的 Manager 调 `Reset()` 并清空 `ManagerGroup`。新增模块级序号/注册表时必须同步接入这条路径，否则连续开第二局会首帧分叉。详见 [跨局清理](../models/3_rollback_and_sync.md#cross-session-cleanup)。
+
 ## 2. 核心 Manager 速查
 
 | Manager | 主要职责 | 重要入口 / 状态 |

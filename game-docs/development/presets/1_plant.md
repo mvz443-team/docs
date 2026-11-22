@@ -47,20 +47,32 @@ PlantsManager.TryPlant
 
 - 静态数值：`maxHealth / cost / cooldown / damage`，通常用 `LevelScaledValue`。
 - 运行时状态：`level / isSleeping / shieldHealth / damagedSum / inBruteShoot / fuse / hasExploded` 等。
-- 攻击时序：用 `this.tickmanager.schedule()` 或兼容的 `delayedCall()`。
+- 攻击时序：一律用 `this.tickmanager.schedule(eventName, ms, args)`，事件名定义在 preset 本地常量并加入 `tickEventNames`。**不要**用 `addEvent({ callback })` 承载需要跨端/跨进程恢复的技能逻辑——`callback:N` 是进程内注册表句柄，重连后含义不同。
 - 目标判定：读取 SightLine 查询结果，决定是否攻击。
 - 星碎逻辑：`onStarShards()`。
 - 受击 / 死亡逻辑：`onHurt()` / `onDeath()`。
 
-骨骼：
+骨骼（事件名驱动，参数 JSON 安全）：
 
 ```ts
+const MY_PLANT_EVENTS = {
+  Shoot: "MyPlantShoot",
+  Fire: "MyPlantFire",
+} as const;
+
 export class MyPlantModel extends PlantModel {
+  public override readonly tickEventNames: readonly string[] = [
+    ...DEFAULT_TICK_EVENT_NAMES,
+    MY_PLANT_EVENTS.Shoot,
+    MY_PLANT_EVENTS.Fire,
+  ];
+
   public override pid = 999;
   public override nameKey = "name_my_plant";
   public override descriptionKey = "my_plant_description";
   public override texturePath = "plant/my_plant";
 
+  // 静态数值 sealPlantConfig() 后迁入非枚举 config，不进快照
   public maxHealth = new LevelScaledValue(300);
   public cost = new LevelScaledValue(100);
   public cooldown = new LevelScaledValue(5000);
@@ -68,32 +80,35 @@ export class MyPlantModel extends PlantModel {
   public damage = new LevelScaledValue(20);
   public isNightPlant = false;
 
+  // 运行时状态：进快照
+  public inBruteShoot = false;
+
   public override createEntity(scene, col, row, level): MyPlantEntity {
     return this.initializeEntity(new MyPlantEntity(scene, col, row, level));
   }
 
   public override onCreate(entity: MyPlantEntity): void {
     entity.setSightLine(/* ... */);
-    this.tickmanager.addEvent({
-      startAt: 800,
-      delay: 1000,
-      repeat: -1,
-      callback: () => this.tryShoot(entity),
-    });
+    this.tickmanager.schedule(MY_PLANT_EVENTS.Shoot, 800, { repeat: -1, interval: 1000 });
   }
 
-  private tryShoot(entity: MyPlantEntity): void {
-    if (entity.isSleeping || this.inBruteShoot) return;
-    if (!entity.hasSightTarget()) return;
-    entity.playShootAnimation();
-    this.tickmanager.delayedCall({
-      delay: 200,
-      callback: () => this.shoot(entity),
-    });
+  public override handleTickEvent(eventName, args = null, timerId?): void {
+    const entity = this.host as MyPlantEntity | null;
+    if (!entity) return;
+    if (eventName === MY_PLANT_EVENTS.Shoot) {
+      if (entity.isSleeping || this.inBruteShoot || !entity.hasSightTarget()) return;
+      entity.playShootAnimation();
+      this.tickmanager.schedule(MY_PLANT_EVENTS.Fire, 200);
+      return;
+    }
+    if (eventName === MY_PLANT_EVENTS.Fire) {
+      if (entity.currentHealth > 0) this.shoot(entity);
+      return;
+    }
+    super.handleTickEvent(eventName, args, timerId);
   }
 
   private shoot(entity: MyPlantEntity): void {
-    if (entity.currentHealth <= 0) return;
     ProjectileCmd.Create(ArrowModel, entity.scene, entity.x, entity.row, {
       damage: this.damage.getValueAt(entity.level),
       faction: Faction.PLANT,
@@ -103,7 +118,7 @@ export class MyPlantModel extends PlantModel {
 }
 ```
 
-推荐把新增技能 timer 改成枚举事件，并把事件名加入 `tickEventNames`；详见 [Model 定时器](../models/1_model.md#model-tick)。
+详见 [Model 定时器](../models/1_model.md#model-tick) 与 [Model 静态配置](../models/1_model.md#model-state)。
 
 <a id="plant-entity"></a>
 
@@ -158,14 +173,14 @@ export class MyPlantEntity extends PlantEntity {
 普通射击植物的判定链必须按以下顺序：
 
 ```text
-tick 到点
+tick 到点（事件名来自 tickEventNames）
   ├─ 植物是否死亡 / currentHealth <= 0
   ├─ 是否睡眠 isSleeping
   ├─ 是否处于暴力发射 inBruteShoot
   ├─ SightLine.hasTarget()
   ├─ playShootAnimation()
-  └─ delayedCall(约 200ms)
-       └─ 再次确认存活 → ProjectileCmd.Create(...)
+  └─ tickmanager.schedule(Fire, 约 200ms)
+       └─ Fire 事件里再次确认存活 → ProjectileCmd.Create(...)
 ```
 
 以 `dispenser.ts` 为例：
@@ -186,17 +201,20 @@ tick 到点
 
 一个格子可以同时存在承载物（睡莲 / 小船）、主植物、护盾、魔法粉等。`PlantsManager.PlantsMap` 的 key 是 `${col}-${row}`，value 是植物数组。
 
-### 6.1 僵尸转移啃食目标
+### 6.1 僵尸普攻目标选择（不要折叠数组）
 
-`PlantHelper.IsMorePriorityPlant(prevPlant, newPlant)` 的规则：
+僵尸啃食目标必须使用 `MonsterModel.attackTargetRank(pid)` 的**显式全序**：
 
-| 顺序 | 条件 | 结果 |
-| --- | --- | --- |
-| 1 | `prev.pid === new.pid` | 不转移 |
-| 2 | `prev` 是承载物（lily pid=6 / boat pid=100），`new` 不是 | 转移 |
-| 3 | `new` 是护盾，`prev` 不是 | 转移 |
-| 4 | `new` 是魔法粉 | 无条件转移 |
-| 5 | 其他 | 不转移 |
+| rank | 植物类型 |
+| --- | --- |
+| 0 | 护盾植物（pid 19 南瓜护照） |
+| 1 | 粉尘植物（魔术粉 / 萤石粉） |
+| 2 | 普通植物 |
+| 3 | 承载物（睡莲 / 小船） |
+
+`pickBestCandidate()` 先按 rank 升序，同级按 `pid`、再按 `SnapshotId` 字符串升序兜底。这样候选结果与 `PlantsMap` 数组插入顺序完全无关。
+
+**不要**再用 `PlantHelper.IsMorePriorityPlant` 折叠 `PlantsMap` 数组选目标：粉尘与护盾互相“高于”对方，该关系非传递，折叠结果会随插入顺序变化；重连按快照 id 重建实体后数组顺序与连续运行不同，必然导致 desync。该函数目前只用于“新碰撞目标是否顶掉当前目标”等局部判断。
 
 调用链：
 
@@ -206,43 +224,53 @@ Rapier collision
   → MonsterEntity.onCollision
   → MonsterModel.onCollision
   → MonsterModel.tryStartAttack
-      └─ IsMorePriorityPlant(current, target)
-          → stopAttacking()
-          → attacking = target
-          → target.underAttackBy.add(entity)
-          → 重新挂攻击 timer
+      ├─ canStartAttack()（体态/冻结/阵营过滤）
+      ├─ pickBestCandidate()（attackTargetRank 全序）
+      └─ attacking = target + 关系集合更新
 ```
 
-目标死亡时反向清理：`PlantEntity.destroy()` 遍历 `underAttackBy`，让所有 attackers 执行 `stopAttacking()`，僵尸恢复移动，等待下一次碰撞重新选目标。
+目标死亡接力由 Model 完成：`PlantEntity.destroy()` 通知 `underAttackBy` → `MonsterEntity.onAttackTargetDestroyed()` → `MonsterModel.onAttackTargetDestroyed()` → `pickContactTarget()` 扫死亡目标格与自身当前格 → `retargetAttack()` **只换目标不重建攻击定时器**。普攻循环 `MonsterAttack` 由 `beginAttackTimer()` / `clearAttackTimer()` 按事件名 `removeByEvent()` 兜底清理，保证任何时刻只有一条循环。`stopAttacking()` 仍需成对维护旧目标关系、`attacking = null`、停手动画、`isStop = false` 和 `startMove()`。
 
 ### 6.2 子弹穿透同格植物
 
 `BulletEntity.onCollision()` 命中植物后：
 
 ```text
-PlantHelper.GetPlantsInGrid(col,row)
+ProjectileModel.canHit(plant) 过滤体态（tiny/flying/inVoid）
+  → PlantHelper.GetPlantsInGrid(col,row)
   → applyEffect(current)
   → 穿透次数判定
   → 在同格中找 IsMorePriorityPlant(candidate, current) 的植物
   → 继续命中更高优先级目标
 ```
 
-这保证“先打承载物、后打上面植物”或“护盾优先”的行为在子弹穿透时同样成立。
+子弹同格穿透仍用 `IsMorePriorityPlant`（这与僵尸普攻的 `attackTargetRank` 是两条不同链路），但候选必须先经过 `ProjectileModel.canHit()` 的体态过滤——`hitKind` 为 `laser/explosion` 的攻击可命中更低矮或更高层的目标，普通 bullet 不行。这保证“先打承载物、后打上面植物”或“护盾优先”的行为在子弹穿透时同样成立，且不会因为体态规则造成穿透到不该打的目标。
 
-### 6.3 铲除 / 星碎选择
+### 6.3 铲除 / 星碎选择（所见即所得）
 
-`PlantHelper.GetHighestPriorityPlant(plants, pointer)` 用于玩家操作：
+规则集中在零依赖纯函数 `src/game/utils/helper/PlantTargeting.ts`，调用顺序固定为 `carrier`（睡莲/船）→ `inner`（内部植物）→ `shield`（护盾植物 pid 19）。
+
+星之碎片：`PlantHelper.GetStarShardsTarget(plants, aspect)`，`aspect` 由鼠标在格子内的上下半区产生（`up` / `down`）：
 
 | 场景 | 规则 |
 | --- | --- |
-| 只有 1 个植物 | 直接返回 |
-| 2 个植物且有承载物 | 优先非承载物 |
-| pointer=down | 优先护盾 |
-| pointer=up | 优先非护盾、非承载物 |
+| 同格有护盾 + 内部植物 | `down` → 护盾外壳；`up` → 内部植物 |
+| 只有内部植物 / 只有护盾 | 直接选中 |
+| 只剩承载物 | 承载物兜底 |
 
-种植侧规则在 `PlantHelper.CanPlantInGrid()`：地块白名单读 `allowedPlantSlots`，基座关系读 `requiredBasePid`（当前南瓜头·晚上 `11 → 阴森南瓜头 9`、反坦克分发器 `14 → 发射器 1`），叠种读 `placementRule` / `stackRole`；一次性植物由 `isOneTimePlant` + `applyInstantEffect()` 在同一确定性帧结算，不创建 Entity / 物理体。
+铲除：`PlantHelper.GetRemovePlantTarget()` → `GetHighestPriorityPlant(plants, pointer)`，同样是 `down` 先铲护盾、`up` 先铲内部植物；两株且有承载物时优先非承载物。`SHIELD_PLANT_PIDS = [19]`，但护盾角色的唯一真相是 `plant.stackRole === 'shield'`，pid 表只作回落兼容。
 
-高级植物替换基座时，无论昼夜与默认睡眠规则，都会继承基座植物的 `isSleeping` 状态（通过 `PlantCmd.SetSleeping` 延迟应用）。替换逻辑集中在 `PlantHelper.CreateEntityWithBaseReplacement()`：只销毁 `requiredBasePid` 指定的那一株，同格睡莲/护盾等其他植物不受影响；先创建新植物再销毁基座，便于正在啃咬的怪物在同一帧重新选目标。preset 的 `createEntity` 不再各自处理基座。
+**强制约束**：`CursorManager.updateStarShardsHighlight()`（预览）与 `PlantsManager.handleAttemptUseStarShards()`（执行）必须调用同一个 `PlantHelper.GetStarShardsTarget`，否则会出现“高亮 A、实际给 B”。
+
+种植侧规则在 `PlantHelper.CanPlantInGrid()`，校验顺序：
+
+1. 无 Model 保守拒绝；
+2. 地块白名单 `allowedPlantSlots`（`ground/water/sky`，`null` = 不限）；
+3. 基座关系 `requiredBasePid`（`11 → 9` 阴森南瓜头、`14 → 1` 发射器），命中则短路后续规则；
+4. `placementRule` / `stackRole` 的同格冲突（`overlayAny` / `overlayExisting` / carrier / shield / normal）；
+5. 水格收口：水本生直接种、`overlayExisting` 优先于承载物，否则必须有 carrier。
+
+一次性植物由 `isOneTimePlant` + `applyInstantEffect()` 在同一确定性帧结算，不创建 Entity / 物理体。高级植物替换基座统一走 `PlantHelper.CreateEntityWithBaseReplacement()`：先创建新植物再销毁 `requiredBasePid` 指定的那一株，并继承基座 `isSleeping` 状态（通过 `PlantCmd.SetSleeping` 延迟应用）；同格睡莲/护盾等其他植物不受影响。preset 的 `createEntity` 不再各自处理基座。
 
 <a id="plant-case-dispenser"></a>
 
@@ -294,21 +322,26 @@ PlantHelper.GetPlantsInGrid(col,row)
 | 交互 | 处理位置 | 说明 |
 | --- | --- | --- |
 | 夜间睡眠 | `PlantEntity.setSleeping()` → `PlantModel.onSleepStateChange()` | 夜间植物白天开局睡眠；timer 回调必须检查 `isSleeping` |
-| 承载物（睡莲 / 小船） | `PlantHelper.isCarrier()` | 影响同格种植、僵尸目标切换、铲除优先级 |
-| 护盾植物 | `SHIELD_PLANT` | 影响僵尸目标切换与玩家铲除优先级 |
+| 承载物（睡莲 / 小船） | `PlantHelper.isCarrier()` / `stackRole='carrier'` | 影响同格种植、僵尸目标切换、铲除优先级 |
+| 护盾植物 pid 19 | `stackRole='shield'`、`PlantTargeting.SHIELD_PLANT_PIDS` | 同格内部植物由 `PlantModel.redirectDamageToShield()` 转发伤害；僵尸普攻 rank 0；AoE 逐株直伤不吸收 |
+| 气球TNT pid 20 | `tiny` 充气三态 | 充满后 `tiny=false`，只被飞行怪引爆；星碎召唤 mid 21 PLANT 阵营分身 |
 | 黑曜石护盾值 | `PlantModel.shieldHealth` | 写在 Model；Entity 只 `declare` 该字段并在 `syncViewFromModel()` 里切帧，不得用 `shieldHealthMax` 等自有字段遮蔽 |
-| 魔法粉 | `magicPowderPid` | 僵尸 / 子弹无条件改目标 |
-| 星碎大招 | `onStarShards()` | 用 `inBruteShoot` 或等价字段防重入，状态进快照 |
-| 冻结 / 减速 debuff | `host.applyDebuffTo()` | debuff 时长与效果进入对应状态 |
+| 魔法粉 / 萤石粉 | `magicPowderPid`、`placementRule='overlayAny/overlayExisting'`、`isOneTimePlant` | 同格粉尘植物；僵尸普攻 rank 1；一次性效果不创建 Entity |
+| 星碎大招 | `onStarShards()` | 用 `inBruteShoot` 或等价字段防重入，状态进快照；目标选择走 `GetStarShardsTarget` |
+| 冻结 / 减速 debuff | `host.applyDebuffTo()` → `CombatEntity.addDebuff()` | 时长与效果进 Model 的到期帧字段；Entity 不做免疫判断 |
 | 阳光 / 能量 | `ResourceCmd` | 不直接改 ResourceManager 字段 |
+| 接触即触发 | `onCollision` + 一次性补判 | 气球TNT/TNT 地雷删除每帧轮询；状态切换瞬间可能已重叠，用 `checkAirborneCollisionOnce` / `checkContactOnce` 补判一次 |
 
 ## 11. 检查清单
 
 - [ ] Model 定义所有数值和运行时状态。
 - [ ] Entity 只做 `buildView()` 与表现方法；重名的 Model 字段一律 `declare`。
-- [ ] 攻击 timer 在触发前检查死亡、睡眠、暴力发射、目标。
-- [ ] 延迟发射前再次确认植物存活。
-- [ ] 同格优先级使用 `PlantHelper.IsMorePriorityPlant()`，不要重复实现规则。
+- [ ] 攻击 timer 在触发前检查死亡、睡眠、暴力发射、目标；事件名加入 `tickEventNames`，不用 `addEvent({ callback })`。
+- [ ] 延迟发射用事件名再次确认存活后再生成投射物。
+- [ ] 僵尸普攻目标用 `attackTargetRank` 全序；子弹穿透才用 `IsMorePriorityPlant` + `canHit` 体态过滤。
+- [ ] 星碎/铲除目标用 `PlantTargeting`，预览与执行共用同一入口。
+- [ ] 静态数值/`EquipmentDef` 封进非枚举 config，不进快照；运行时状态进快照。
 - [ ] 一次性效果有 `hasExploded` / `hasTriggered` 等快照字段。
 - [ ] 稳定 key 使用 `plant:${col}:${row}:${pid}`。
 - [ ] PRNG 对象加入 `PLANT_PRNG_FIELDS`。
+- [ ] “接触即触发”用 `onCollision` + 一次性补判，不回到每帧轮询。

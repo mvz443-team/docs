@@ -10,6 +10,8 @@
 >
 > 2026-11-18 更新：页面刷新这类“本地状态完全丢失”的重连已补充两条恢复路径——服务端在 `AllReady` 中持久化载荷（`room_id/chapter_id/stage_id` 与双方 `loadout`）供客户端重建 `GameParams`；在已确认 checkpoint 不可用时，服务端向延迟最低的在线玩家索取一次兜底快照，再连同快照帧到当前权威帧之间的操作转发给重连客户端（见 [§9.3](#history-gap-and-reconnect)）。服务端仍不保存该快照。2026-11-19 追加第三条兜底：客户端每帧 blank 心跳上报 `energy/star_shards/card_cooldowns` 资源 profile，服务端按玩家保存并在重连 `AllReady` 中回传；客户端只在本地帧号追上 profile 帧号时套用，跳帧恢复（checkpoint/快照）后直接丢弃，避免重演期资源叠加造成摘要分叉。
 
+> 2026-11-22 更新：补充跨局清理清单（§15）与 netDebug/复现链路（§16），并修正本文示例中的帧参数：状态摘要每 20 帧采样、checkpoint 每 200 帧、服务端 `CommandLeadFrames = 2`。
+
 > 2026-11-16 更新：已按“预测式帧同步 + 可恢复回滚”的目标调整实现：
 > 1. 分叉不再只报不修；客户端进入不可恢复的离线单机模式，恢复暂停/倍速与正常收益，并在结算时下载一次 Desync 日志。
 > 2. 新增每 200 帧一次的低频 checkpoint；只在双端摘要一致时由服务端采纳，重连后从 checkpoint 之后回放权威操作。
@@ -197,7 +199,7 @@ Entity 用 `consumeLogicEvents()` 按 `eventId` 去重消费；回滚时队列�
 
 确定性自检：
 
-- `CombatManager` 每 10 帧采样一次状态哈希，环形快照大小 20。
+- `CombatManager` 每 20 帧采样一次状态哈希（`STATE_HASH_INTERVAL_FRAMES = 20`），环形快照大小 20（`SNAPSHOT_INTERVAL_FRAMES = 10`）。
 - 回滚后会重放并记录哈希，验证恢复结果。
 - `hashSimulationState()` 用 FNV-1a，并按 IEEE-754 位模式写数值，避免 NaN / -0 / 键顺序差异。
 
@@ -212,7 +214,7 @@ Entity 用 `consumeLogicEvents()` 按 `eventId` 去重消费；回滚时队列�
 - 维护房间生命周期：`InLobby → Preparing → Loading → InGame → PostGame`。
 - 保存房主选择的 `chapterId/stageId`、房间 `seed` 和双方规范化后的 `loadout`。
 - 以 `FrameIntervalMs`（默认 50ms）推进服务端逻辑帧；调试时可由 `MVZ_DEBUG_FRAME_MS` 压缩到 1~50ms。
-- 接收玩家操作和心跳，把操作调度到 `[current+CommandLeadFrames, current+MaxDelayFrames]`，当前为 `current+4 ~ current+10`。
+- 接收玩家操作和心跳，把操作调度到 `[current+CommandLeadFrames, current+MaxDelayFrames]`，当前为 `current+2 ~ current+10`（`CommandLeadFrames = 2`，`MaxDelayFrames = 10`，见 `constants/frame.go`）。超窗操作会被拒绝，并以确定性错误操作写入权威帧后回传。
 - 对种植、铲除、星屑做轻量校验：格子范围、同帧同格冲突、成本上下界、自报资源非负。
 - 按固定规则排序同一帧操作并编号，写入 `frameHistory`。
 - 根据每个玩家的 `ackFrameId` 补发历史帧；全部 ACK 或超过 600 帧后裁剪历史。
@@ -376,7 +378,7 @@ CombatManager.sampleStateHash（每 20 帧）
 - `LogicState.test.mjs` / `LogicModel.test.mjs`：Undo Log、帧号、事件队列、Model 字段回滚。
 - `loadout.test.mjs`：两端规范化与摘要一致性。
 
-最近一次 bugfix 记录显示核心测试为 23/23 通过（含寄存器覆盖补齐），但类型检查仍有既有 `SightLineEntity` 错误；本轮文档复查未重新运行完整构建。
+当前基线见 §14.4：核心测试 29/29 通过，EntityTickManager 专项 1/1、inline 快照专项 3/3，`npx tsc --noEmit -p tsconfig.json` 无错误。旧的 23/23 与 `SightLineEntity` 类型错误记录已过时。
 
 ### 12.2 Go 服务端测试
 
@@ -443,7 +445,7 @@ CombatManager.sampleStateHash（每 20 帧）
 
 ### 14.2 Checkpoint 与追帧
 
-- 客户端每 10 帧采样 32 位摘要，用于分叉检测。
+- 客户端每 20 帧采样 32 位摘要（`STATE_HASH_INTERVAL_FRAMES = 20`），用于分叉检测；checkpoint 每 200 帧才构造一次，10 帧仅用于检测。
 - 每 200 帧（默认 10 秒）构造一次 checkpoint：不含 `physics`，体积超过 6KB 时只上报 hash。
 - `RequestBlank.state_hash_hex` 传 8 位十六进制摘要，`inline_snapshot_json` 传可恢复状态；服务端只在双端 hash 一致时确认 `LastCheckpointFrame`。
 - `ResponseCheckpointAccepted` 通知两端 checkpoint 已生效。
@@ -470,3 +472,29 @@ CombatManager.sampleStateHash（每 20 帧）
 - 回放快照专项：Go 测试验证已确认 checkpoint 的 inline 正文随 replay 返回。
 
 旧的 11.4 节记录的是修复前状态；以本节和对应提交为准。
+
+<a id="cross-session-cleanup"></a>
+
+## 15. 跨局清理（连续开第二局）
+
+页面不刷新连续开第二局时，模块级序号与注册表必须清零，否则第一帧的哈希就会分叉。已发生事故：`ProjectileCmd.nextProjectileSeq` 与 `activeProjectiles` 残留，一端从 1239 起、一端从 1 起。
+
+| 状态 | 清理位置 | 说明 |
+| --- | --- | --- |
+| `ProjectileCmd.activeProjectiles / rebuildFactories / rebuildInfo / liveDealers / nextProjectileSeq` | `ProjectileCmd.clearProjectiles(scene?)`，由 `Game.teardownSession()` 调用 | 带 `scene` 守卫，避免新旧场景交替时误清新一局 |
+| `EntityTickManager.managedTickManagers` | `EntityTickManager.ResetAll()` | 旧实体定时器会继续 tick 并按旧 `SnapshotId` 写事件 |
+| `logicEvents` | `LogicEvents.reset()`，由 `CombatManager` / `Game` 拆除路径调用 | 旧事件游标会污染新局的事件去重 |
+| `TickerManager.timerFactories` | `TickerManager.Reset()` | 工厂在新局 `Load()` 重新注册，残留会让 checkpoint 重建出上一局才有的 timer kind |
+| `__MVZ443_GAME__` 等全局引用 | `Game.teardownSession()` | 幂等，入口为结算退出 / SHUTDOWN / DESTROY |
+
+固定步之外的 capture 入口（快照请求、诊断导出）必须先 `DeferredManager.flush()`，否则会把尚未 adopt 稳定 id 的临时 `entity_N` 写进哈希。跨进程重建实体必须 adopt 快照 id，`ProjectileCmd.rebuildFromInfo` 走纯数据路径时尤其容易漏。
+
+<a id="net-debug"></a>
+
+## 16. netDebug 与复现
+
+- 客户端开关：`netDebug=1/0`（URL query 或 localStorage `mvz443.debug.netDebug`，设置页可切换），开启时挂载 `window.MVZ_NET` 测试钩子；网络层日志按开关门控。
+- 服务端开关：`-netDebug` 与 `-netDebugDir`。默认日志目录为可执行文件同目录的 `desync-logs/`（空路径兜底为 CWD 下 `netDebug-logs/`），启动日志会明确打印路径；目录不存在时自动创建。
+- 服务端记录内容：每个命令的实际接收帧与改写后的执行帧（`operation_execution_frame`）、完整请求 payload、逐帧状态摘要、玩家帧/ACK/连接快照、阶段流转、战局终态；检测到分叉立即落盘 `room-<id>-<session>.jsonl` 与 `.desync.json`，不等房间结束。
+- 客户端 full-log：主动退出（暂停 → 确认退出）和被踢/结算时导出，环形缓冲可截断旧事件，但不能丢最后一次权威 hash 与退出原因。
+- 复现脚本 `replay-desync.mjs` 接受两名客户端日志与一份服务端日志，输出操作时间线、权威帧、hash 分叉点与最终判定。

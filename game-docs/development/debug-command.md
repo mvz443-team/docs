@@ -47,13 +47,13 @@ DBG is only available in local single-player games. current mode=online, players
 
 ### 1.2 与“显示调试信息”设置的关系
 
-设置里的“显示调试信息”（`isDebug`）控制的是另一套可视化调试：
+设置里的“显示调试信息”（内部字段已更名 `basicDebug`，cookie 键仍兼容旧 `isDebug`）控制的是另一套可视化调试：
 
 - 显示 `frameId / ackFrameId`；
 - 显示“按 D 切换 Rapier 调试”的提示；
 - 按 `D` 切换 Rapier 碰撞体线框。
 
-它**不控制** `DBG`。`ConsoleCmd.install()` 是无条件调用的，所以即使没有开启“显示调试信息”，Console 里的 `DBG` 仍然存在。
+它**不控制** `DBG`。`DBG` 的安装由独立的 `dbgCommands` 开关控制（URL query `?dbgCommands=1`、localStorage `mvz443.debug.dbgCommands` 或设置页开关）；开启后 `ConsoleCmd.install()` 才挂载命令。另有 `netDebug` 开关（`?netDebug=1`）控制网络日志与 `window.MVZ_NET` 测试钩子。
 
 ## 2. 命令速查
 
@@ -68,6 +68,7 @@ DBG is only available in local single-player games. current mode=online, players
 | `DBG.cooldownCard(slot)` | 卡槽序号，从 0 开始 | 把该卡槽冷却清零，**立即就绪** | 更新后的 `CardInfo` |
 | `DBG.cards()` | 无 | 打印并返回所有卡槽状态 | `CardInfo[]` |
 | `DBG.cardInfo()` | 无 | `cards` 的别名 | `CardInfo[]` |
+| `DBG.downloadLogs()` | 无 | 下载 netDebug 诊断日志（需 `netDebug=1`） | `void` |
 
 被拦截、参数非法或目标不存在时，命令会 `console.warn` 并返回 `null`。
 
@@ -103,23 +104,28 @@ DBG.spawn(10, 1, 10)
 - `mid` 不存在：打印 `Monster mid=... does not exist.`，返回 `null`；
 - 非本地单人：打印范围限制警告，返回 `null`。
 
-当前注册的怪物 mid：
+当前注册的怪物 mid（1~28，注册入口 `MonsterLibrary.Initialize()`）：
 
 | mid | preset `nameKey` | mid | preset `nameKey` |
 | --- | --- | --- | --- |
-| 1 | `Zombie` | 10 | `Vindicator` |
-| 2 | `CapZombie` | 11 | `VindicatorSolider` |
-| 3 | `HelmetZombie` | 12 | `ObsidianGolem` |
-| 4 | `MinerZombie` | 13 | `Warden` |
-| 5 | `MinerHelmetZombie` | 14 | `TurtleZombie` |
-| 6 | `Skeleton` | 15 | `Mutant` |
-| 7 | `SkeletonBow` | 16 | `TurtleSkeletonBow` |
-| 8 | `StickZombie` | 17 | `Centipede` |
-| 9 | `Evoker` | 18 | `CentipedeMinion` |
+| 1 | `Zombie` | 15 | `Mutant` |
+| 2 | `CapZombie` | 16 | `TurtleSkeletonBow` |
+| 3 | `HelmetZombie` | 17 | `Centipede` |
+| 4 | `MinerZombie` | 18 | `CentipedeMinion` |
+| 5 | `MinerHelmetZombie` | 19 | `BalloonZombie` |
+| 6 | `Skeleton` | 20 | `BalloonCapZombie` |
+| 7 | `SkeletonBow` | 21 | `BalloonTntClone` |
+| 8 | `StickZombie` | 22 | `BoatZombie` |
+| 9 | `Evoker` | 23 | `BoatCapZombie` |
+| 10 | `Vindicator` | 24 | `BoatHelmetZombie` |
+| 11 | `VindicatorSolider` | 25 | `BoatTurtleZombie` |
+| 12 | `ObsidianGolem` | 26 | `BoatSkeletonBowZombie` |
+| 13 | `Warden` | 27 | `DivingZombie` |
+| 14 | `TurtleZombie` | 28 | `DolphinRiderZombie` |
 
 注意事项：
 
-- 只有 `mid = 17 / 18`（蜈蚣及其小怪）的 `couldCarryStarShards` 为 `false`。对它们传入 `carryStarShards = true` 时，怪物仍会生成，但不会携带星之碎片，并会打印警告。
+- `couldCarryStarShards: false` 的怪物为 `mid = 17 / 18 / 21`（蜈蚣、蜈蚣幼虫、气球TNT分身）。对它们传入 `carryStarShards = true` 时，怪物仍会生成，但不会携带星之碎片，并会打印警告。
 - 调试生成的怪物使用 `waveID = -9999`，不会计入波次击杀数，也不会触发波次击杀统计。
 - 该命令为了调试方便，直接调用 `model.createEntity()` 并注册到 `MobManager`，**没有走 `MobCmd` 的 defer 队列，也没有分配稳定快照 key**。因此它只适合本地调试，不能作为正式生成流程的参考。
 - `col` 不做 clamp；`row` 才会 clamp。
@@ -176,6 +182,8 @@ DBG.add("星碎", -2)                  // 星之碎片 -2，最少到 0
 | `hasReloaded` | `displayLeftMs <= 0` 时为 `true`，表示卡牌已就绪 |
 
 帧换算规则：`Math.ceil(ms / frameIntervalMs)`，当前 `frameIntervalMs = 50`，即 1 帧 = 50ms。
+
+注意：这些 `leftMs / previewLeftMs` 是 `ConsoleCmd.getCardInfo()` **现算**的展示值。正式逻辑里 `CardpileManager` 只保存 `cooldownEndFrame`（权威帧号），不逐帧递减剩余时间，也不把 `leftMs` 当权威快照字段；`DBG` 读取的是展示层结果。
 
 示例输出字段：
 

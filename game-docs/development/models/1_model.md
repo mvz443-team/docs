@@ -75,7 +75,7 @@ Model 可以直接调用这些能力，也可以通过 [Cmd](../kit/2_cmd.md#cmd
 | shield | `IShieldModel` / `withShieldModel` | 是否格挡、护盾血量、破碎溢出伤害 | 盾牌 sprite、切 frame |
 | weapon | `IWeaponModel` / `withWeaponModel` | 武器是否可见、是否挥动、消耗武器 | 手持挂点、挥动 Tween |
 
-装备定义 `EquipmentDef` 是 JSON 安全的普通对象，包含 `key / maxHealth / thresholds / damageScale / hitSound / visual`。它定义在 Model 侧，可随 Model 快照保存。
+装备定义 `EquipmentDef` 是 JSON 安全的普通对象，包含 `key / maxHealth / thresholds / damageScale / weaponDamage / hitSound / visual` 等字段。它定义在 Model 侧，但属于**静态配置**：`sealMonsterConfig()` 会把它迁入非枚举 config，通过 getter 读取，**不进入快照**。只有运行时状态（护甲/护盾当前血量、`helmetBroken / shieldBroken / weaponVisible / weaponSwinging`、武器剩余耐久）才进快照。武器伤害用 `weaponDamage` 表示，与 `baseAttackDamage` 相加得到 `getAttackDamage()`；旧字段 `damageLossOnBreak` 已移除。
 
 典型用法：
 
@@ -130,7 +130,7 @@ export class CounterPlantModel extends PlantModel {
 - `Map` / `Set` / class instance
 - `LevelScaledValue`、`Phaser.Sprite`、`RAPIER.RigidBody`
 
-类实例配置（如 `LevelScaledValue`、工厂函数）不会进入 `flags.model`，也不要运行时改写。`EquipmentDef` 是 JSON 安全的纯对象，会随 Model 快照保存；这是为了让回滚后仍能知道护盾/武器的配置与当前状态。
+类实例配置（如 `LevelScaledValue`、工厂函数）不会进入 `flags.model`，也不要运行时改写。植物 preset 的静态字段与怪物 `EquipmentDef` 通过 `sealPlantConfig()` / `sealMonsterConfig()` 迁入非枚举 config（配 getter），同样不进快照——配置由代码决定，回滚后按同一份代码重建即可；只有运行时状态进快照。`cloneLogicModel()` 会跳过 prototype 上的 getter 属性，冻结的 config 也会跳过 Proxy 包装。
 
 ### 字段命名注意
 
@@ -142,6 +142,30 @@ export class SomeMonsterEntity extends BaseMonsterEntity {
   declare public isFrozen: boolean;
 }
 ```
+
+<a id="model-buffs"></a>
+
+### Buff / Debuff 状态
+
+`src/game/core/logic/Buffs.ts` 定义 `slow / frozen / berserk` 三种状态及到期事件。状态**全部在 Model**：`MonsterModel` 用三个到期帧字段记录，进入快照；`CombatEntity` 只提供 `addDebuff / removeDebuff / hasDebuff / clearAllDebuffs` 委托给 Model 的 `applyBuff / clearBuff / getBuffLeftMs / clearAllBuffs`。
+
+关键规则：
+
+- 同一种 buff 不叠加时长，取最长到期帧；`definition.buffImmune === true` 的怪物直接拒绝（目前是 mid 12 黑曜石傀儡、13 监守者、17 蜈蚣）。
+- `frozen` 到期会链一段 `slow`（`FROZEN_CHAIN_SLOW_MS = 5000`），冰冻期间立即停攻停移，结束后由 Model 重建。
+- 减速/狂暴通过 `getSpeedScale()` / `getAttackIntervalScale()` 影响移动与攻击节奏， Entity 的动画控制器只按这些倍率调整播放速度，不自己判断何时恢复。
+- 不要在 Entity 上用 `isFrozen` 自有字段遮蔽访问器；字段名与 Model 一致时必须写 `declare`。
+
+<a id="model-body-traits"></a>
+
+### 体态标签（tiny / flying / void）
+
+`LogicModel` 上的 `tiny / flying / inVoid` 是三个普通布尔字段，自动进入快照与哈希，表示“目标占据哪一层”或“攻击能到达哪一层”。唯一判定入口是 `src/game/core/logic/BodyTraits.ts` 的 `canReachBody()` / `readBodyLayers()`：目标占据的每一层，攻击方都必须能到达。
+
+- 投射物：`ProjectileModel.canHit(target)`；`hitKind`（`bullet` / `laser` / `explosion`）供坐骑/护甲区分伤害来源。
+- 植物射击判定线：`SightLineOptions.reach`。
+- 僵尸普攻：`MonsterModel.canStartAttack()`。
+- 禁止再写裸的 `if (isFlying)` 分支；怪物体态由 Model 在技能/坐骑状态变化时改写，Entity 只通过 `syncViewFromModel()` 单向恢复表现。详见 `mvz443/docs/body-traits.md` 与 `body-traits-inventory.md`。
 
 <a id="model-tick"></a>
 
@@ -284,3 +308,6 @@ private summonVindicator(entity: MonsterEntity | null): void {
 6. 需要视图配合时，通过 `host` 调用 Entity 的纯表现方法。
 7. 需要修改世界状态时调用 [Cmd](../kit/2_cmd.md#cmd-overview)。
 8. 不要用 Entity 字段保存确定性状态；Entity 字段用 `declare`。
+9. 静态配置（数值表、`EquipmentDef`、技能常量）放进非枚举 config，不放进快照。
+10. 涉及命中层级时通过 `BodyTraits.canReachBody()` 判定，不写裸的 `if (isFlying)`。
+11. buff/debuff 状态写在 Model 并由到期事件驱动，Entity 只委托 `addDebuff()` 等入口。

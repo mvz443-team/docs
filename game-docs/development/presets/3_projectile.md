@@ -33,10 +33,12 @@ ProjectileCmd              // 创建、登记、快照对账
 
 - `damage`
 - `penetratePower` / `penetratedCount`
-- `couldAttackFlying`
 - `bounceable`
-- `skipTiny`
 - `range`
+- `tiny / flying / inVoid`（体态层，可命中哪些层）
+- `hitKind`：`"bullet" | "laser" | "explosion"`，默认是 `bullet`；`readProjectileHitKind(source)` 是读取入口
+
+体态命中统一用 `ProjectileModel.canHit(target)` → `BodyTraits.canReachBody(this, readBodyLayers(target))`，旧的 `couldAttackFlying` / `skipTiny` 已移除。爆炸覆写为 `hitKind='explosion'` 且 `tiny=true,flying=true`，激光为 `hitKind='laser'`、`tiny=true`。
 
 通用 `applyEffect(entity, target)` 流程：
 
@@ -70,9 +72,9 @@ ProjectileCmd              // 创建、登记、快照对账
 1. 目标必须是 `CombatEntity`。
 2. 已命中目标跳过。
 3. 同阵营跳过。
-4. 目标飞行 / 虚空规则跳过。
+4. `this.model.canHit(target)` 用 `canReachBody()` 按 `tiny / flying / inVoid` 三层过滤，不再写裸 `if (isFlying)`。
 
-Entity 只处理“哪些目标可以进入命中判定”，不决定伤害数值。
+Entity 只处理“哪些目标可以进入命中判定”，不决定伤害数值。坐骑/护甲可根据 `hitKind` 区分 bullet / laser / explosion，决定吸收还是穿透。
 
 <a id="projectile-create"></a>
 
@@ -105,17 +107,17 @@ DeferredManager.defer
 
 ## 5. 碰撞与同格优先级
 
-`BulletEntity.onCollision()` 命中植物时，会调用 `PlantHelper.GetPlantsInGrid(col, row)`，然后递归寻找更高优先级植物：
+`BulletEntity.onCollision()` 命中植物时，先用 `this.model.canHit(plant)` 过滤体态，再调用 `PlantHelper.GetPlantsInGrid(col, row)` 递归寻找更高优先级植物：
 
 ```text
-current = 命中的植物
+current = 命中的植物（已通过 canHit 体态过滤）
 applyEffect(current)
   → 穿透次数是否耗尽
-  → candidate = 同格中 IsMorePriorityPlant(candidate, current) 的植物
+  → candidate = 同格中 canHit(candidate) && IsMorePriorityPlant(candidate, current) 的植物
   → applyEffect(candidate)
 ```
 
-这保证“子弹从承载物打到承载物上的植物”“护盾优先”等行为与僵尸啃食一致。完整优先级规则见 [植物同格优先级](./1_plant.md#plant-priority)。
+子弹穿透仍用 `IsMorePriorityPlant`，但**候选必须先过体态过滤**；这条链路与僵尸普攻的 `attackTargetRank` 全序是两条独立规则，不能混用。完整优先级规则见 [植物同格优先级](./1_plant.md#plant-priority)。
 
 <a id="projectile-lifecycle"></a>
 
@@ -143,7 +145,9 @@ applyEffect(current)
 - 缺失的投射物按 `rebuildFactories` 复活并 `adoptStableSnapshotKey()`。
 - 无工厂则记录 `report.missing`。
 
-投射物不支持“凭空恢复”：工厂必须能根据快照中的 `kind/config` 重建。
+投射物不支持“凭空恢复”：工厂必须能根据快照中的 `kind/config` 重建。跨进程重建时 `ProjectileCmd.rebuildFromInfo` 必须 adopt 快照 id，否则 id / timer group / dealer 解析全部错位。
+
+**跨局清理**：`ProjectileCmd.activeProjectiles`、`rebuildFactories`、`rebuildInfo`、`liveDealers` 与 `nextProjectileSeq` 是模块级状态，页面不刷新连续开第二局时必须在 `Game.teardownSession()` 里调用 `ProjectileCmd.clearProjectiles(this)` 清零（带 `scene` 守卫，避免误清新局）。历史事故：一端从 1239 起、一端从 1 起导致首帧分叉。
 
 <a id="projectile-case-arrow"></a>
 
@@ -186,10 +190,10 @@ ArrowEntity
 
 ## 9. 检查清单
 
-- [ ] 创建统一走 `ProjectileCmd`。
-- [ ] 伤害 / 穿透 / debuff 在 Model。
-- [ ] Entity 只做视图、飞行插值和碰撞过滤。
-- [ ] 同格植物优先级委托 `PlantHelper`。
+- [ ] 创建统一走 `ProjectileCmd`；跨局拆除调用 `clearProjectiles(scene)`。
+- [ ] 伤害 / 穿透 / debuff 在 Model；`hitKind` 决定外层受体如何吸收。
+- [ ] Entity 只做视图、飞行插值和碰撞过滤；命中判定用 `canHit()` / `canReachBody()`。
+- [ ] 同格植物穿透用 `IsMorePriorityPlant` + 体态过滤；僵尸普攻用 `attackTargetRank`，两者不混用。
 - [ ] 一次性投射物有稳定的销毁条件。
-- [ ] 需要 rebuild 的投射物注册了 `rebuildFactories`。
+- [ ] 需要 rebuild 的投射物注册了 `rebuildFactories`，重建时 adopt 快照 id。
 - [ ] 不用 `scene.time.delayedCall()` 承载逻辑。

@@ -236,7 +236,9 @@ private rollSkill(): void {
 → Model 字段 → hp/maxHp/speed → 位置 / 刚体
 ```
 
-Entity 自身不保存可独立序列化的业务状态。若需要在快照中记录实体身份，使用 `SnapshotId` / `adoptStableSnapshotKey()`；实体已不再持有 TimerKey，也不按 group 过滤全局 timer。
+Entity 自身不保存可独立序列化的业务状态。若需要在快照中记录实体身份，使用 `SnapshotId` / `adoptStableSnapshotKey()`；实体不持有进入快照的 TimerKey，也不按 group 过滤全局 timer。
+
+需要注意一个例外：`entity.attackTimer` 句柄只用于本机停止普攻循环，**不进快照**，重连后为 `null`。因此 `MonsterModel.beginAttackTimer()` / `clearAttackTimer()` 必须额外调用 `tickmanager.removeByEvent("MonsterAttack")` 兜底，保证任何时刻只有一条普攻循环；换目标时 `retargetAttack()` 只换关系不重建定时器。
 
 刚体句柄通过 `PhysicsSnapshot` 记录。rebuild 模式下 Rapier world 被替换，再按稳定 handle 找回刚体并补回 `userData`。
 
@@ -249,13 +251,27 @@ MONSTER_RELATION_FIELDS = ["attacking", "underAttackBy", ...];
 
 它们通过 `EntityLookup` 把 `entity:<SnapshotId>` 解析回当前存活实体。
 
-## 8. 新增 Entity 的检查清单
+## 8. 常用实体基类
+
+| 基类 | 适用 | 能力 |
+| --- | --- | --- |
+| `BaseMonsterEntity` / `EquippedMonsterEntity` | 地面僵尸 | 装备视图 + 伤害路由 |
+| `MediumMonsterEntity` / `BaseZombieEntity` | 普通/装甲僵尸 | `baseAttackDamage + weaponDamage`、坐骑挂点 |
+| `FlyingMonsterEntity` | 气球僵尸 / 气球TNT分身 | 载具血条、bullet 吸收、laser/explosion 穿透、落地补判 |
+| `DivingZombieEntity` | 潜水僵尸 | 潜行/探出姿态、波纹、面罩挂点 |
+| `DolphinRiderEntity` | 海豚骑乘僵尸 | 海豚坐骑图层、坐姿、破碎后速度回退 |
+
+这些基类只提供“怎么表现”，技能阶段和伤害决策仍在各自的 Model 中。
+
+## 9. 新增 Entity 的检查清单
 
 1. 确定性字段只在 Model 定义，Entity 用 `declare`。
 2. 构造函数只准备视图/物理参数，不执行技能决策。
 3. `initializeEntity()` 末尾调用 `model.onCreate(this)`。
 4. 视图方法命名成 `playXxx()` / `applyXxx()`，避免承载业务判断。
-5. 碰撞回调只过滤并转发。
-6. 需要延迟逻辑时用 Model 的 `tickmanager.schedule()`，不要用 `scene.time`。
-7. 需要稳定恢复的对象使用 `adoptStableSnapshotKey()`。
-8. PRNG 对象若参与确定性，加入对应 `*_PRNG_FIELDS`。
+5. 碰撞回调只过滤并转发；“接触即触发”用 `onCollision` + 状态切换瞬间一次性补判，不要回到每帧 `stepUpdate` 轮询。
+6. Tween `onUpdate/onComplete`、`scene.time.delayedCall()`、动画完成回调里禁止写 `col/row/x/y`、刚体平移、血量、Cmd 或技能阶段；权威坐标在 tick 事件里一次写入。
+7. 需要延迟逻辑时用 Model 的 `tickmanager.schedule()`，不要用 `scene.time`。
+8. 需要稳定恢复的对象使用 `adoptStableSnapshotKey()`。
+9. PRNG 对象若参与确定性，加入对应 `*_PRNG_FIELDS`。
+10. 实体持有的 timer 句柄（如 `attackTimer`）不进快照，停止时必须按事件名兜底清理。

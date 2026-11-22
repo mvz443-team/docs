@@ -96,6 +96,8 @@ type GridPropertyType = "ground" | "water" | "void" | "sky";
 
 `RowPropertyRatio(row, type)` 缓存每行各地形占比，供出怪权重与放置规则使用。
 
+**地形通行域**：`src/game/core/logic/TerrainHabitat.ts` 用 `dominantHabitat()` 按占比判定行的主地形（水面占比严格 > 0.5 为 `water`，天空严格 > 0.5 为 `air`，否则 `ground`），`canSpawnMonsterInRow()` 过滤不能在该地形行动的怪物（飞行怪无视限制）。调用点在 `MobHelper.selectSpawnRow()`：按 `rowPropertyRatio` 组装 `RowTerrainRatio` 后过滤行权重，全不匹配时回落到基础权重。这样木船僵尸/潜水僵尸只在水行刷出，地面僵尸不会刷到纯水面行。`StageHelper.generateStageScript()` 仍只用 `exceptLine` 让前 3 波避开水道，不在这里按占比过滤。
+
 `PositionManager.setStageGrid(...)` 设置网格尺寸与缩放，然后 `GridManager.initGridProperties()` 默认全为 ground。
 
 昼夜由 `StageScript.dayOrNight` 决定：
@@ -128,10 +130,11 @@ type GridPropertyType = "ground" | "water" | "void" | "sky";
 `CardpileManager` 管理：
 
 - 当前选中卡牌（植物 / 铲子 / 星碎）。
-- 每张卡 `leftMs / previewLeftMs / totalMs` 冷却。
-- `stepUpdate()` 每逻辑帧递减冷却并广播。
+- 每张卡只保存 `cooldownEndFrame`（权威帧号）、`previewPending` 与 `totalMs`，**不逐帧递减冷却，也不把剩余毫秒数写进快照**。
+- 剩余时间由 `cooldownLeftMsAt(currentFrame)` 从权威帧推导：`currentFrame()` 优先取 `recvQueue.currentFrameId`（离线时回落到 `getAuthoritativeFrame()`）。
+- `reloadCard(pid, plantFrame)` 用操作的权威帧重置结束帧；重连/profile 恢复时用 `cooldownEndFrameFromProfile()` 换算。`stepUpdate()` 只广播展示进度。
 
-卡牌冷却参与快照；预显示（preview）只用于本地乐观交互，不代表权威状态。
+预显示（preview）只用于本地乐观交互，不代表权威状态；profile 里上报的 `card_cooldowns` 只在本地帧号追上 profile 帧号后套用，跳帧恢复时丢弃。
 
 <a id="stage-boss-script"></a>
 

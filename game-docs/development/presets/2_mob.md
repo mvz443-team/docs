@@ -140,11 +140,12 @@ Rapier collision
 `tryStartAttack()` 的过滤顺序：
 
 1. 冻结或已锁定同一目标 → 不处理。
-2. 目标是飞行怪且自己不会飞 → 不处理。
-3. 目标在虚空 → 不处理。
-4. 当前目标与新目标都是植物，且 `IsMorePriorityPlant(current, target)` 为真 → 先 `stopAttacking()`。
-5. 设置 `attacking = target`、`isStop = true`、停移动、加入目标 `underAttackBy`、播放攻击动画。
-6. `beginAttackTimer()` 启动 `MonsterAttack` 循环 timer。
+2. `canStartAttack()` 用 `BodyTraits.canReachBody()` 检查体态（目标飞行/虚空/低矮是否可达）。
+3. 若新目标能顶掉当前目标（局部 `IsMorePriorityPlant` 判断），先 `stopAttacking()`。
+4. 设置 `attacking / attackingId`、`isStop = true`、停移动、加入目标 `underAttackBy`、播放攻击动画。
+5. `beginAttackTimer()` 启动 `MonsterAttack` 循环 timer。
+
+**同格多候选时必须用 `MonsterModel.attackTargetRank(pid)` 的显式全序**（护盾 0 > 粉尘 1 > 普通植物 2 > 承载物 3，同级按 pid / SnapshotId 兜底），不能折叠 `PlantsMap` 数组。原因：粉尘与护盾互相“高于”对方，折叠结果随插入顺序变化；重连重建实体后数组顺序不同会导致 desync。`IsMorePriorityPlant` 只保留给“新碰撞目标是否顶掉当前目标”这类局部判断。
 
 <a id="mob-attack-timer"></a>
 
@@ -158,20 +159,21 @@ this.tickmanager.schedule(MONSTER_EVENTS.Attack, intervalMs, { loop: true });
 
 到点后由 `MonsterModel.handleTickEvent()` 调用 `hurtTarget()`：
 
-- 目标为空或血量 ≤ 0 → `stopAttacking()`。
-- 否则造成 `attackDamage`，如果目标死亡再 `stopAttacking()`。
+- 先 `isValidAttackTarget()` 检查目标仍有效。
+- 造成 `getAttackDamage()`，公式为 `baseAttackDamage + 可用主手 weaponDamage`，命中后由 Model 消耗武器耐久。独立的 `attackDamage` 字段已移除，`EquipmentDef.damageLossOnBreak` 改为 `weaponDamage`。
+- 目标死亡后走目标销毁接力，不直接停攻。
 
-timer 存在 Model 中，回滚时随 Model 恢复；暂停时随固定步长循环停止。
+timer 存在 Model 中，回滚时随 Model 恢复；暂停时随固定步长循环停止。`entity.attackTimer` 句柄不进快照，重连后为 `null`，所以 `beginAttackTimer()` / `clearAttackTimer()` 必须额外 `tickmanager.removeByEvent("MonsterAttack")` 兜底，保证任何时刻只有一条普攻循环。
 
 ### 5.3 转移 / 停止条件
 
 | 条件 | 处理 |
 | --- | --- |
-| 碰撞到更高优先级植物 | `tryStartAttack()` 先 `stopAttacking()`，再锁定新目标 |
-| 当前目标死亡 | `PlantEntity.destroy()` 通知 `underAttackBy` 中的僵尸 `stopAttacking()` |
-| 僵尸受击 / 冰冻 | `isFrozen` 阻止新攻击；已有 timer 仍由 Model 决定如何处理 |
-| 僵尸死亡 | `zombieDie()` → `stopAttacking()` → 播放死亡动画 |
-| 撑杆跳僵尸起跳 | `StickZombieModel.tryStartVault()` 改写飞行/速度，落点有植物才 `tryStartAttack()` |
+| 碰撞到更高优先级植物 | `tryStartAttack()` 先 `stopAttacking()`，再锁定新目标；同格候选按 `attackTargetRank` 全序 |
+| 当前目标死亡 | `PlantEntity.destroy()` → `MonsterEntity.onAttackTargetDestroyed()` → `MonsterModel.onAttackTargetDestroyed()` → `pickContactTarget()` → `retargetAttack()`。**换目标不重建攻击定时器**，只更新 `attacking / attackingId` 与关系集合 |
+| 僵尸受击 / 冰冻 | `MonsterModel.applyBuff('frozen', ms)` 立即停攻停移并重建；到期后 Model 恢复，Entity 只按倍率调整动画 |
+| 僵尸死亡 | 死亡动画只做表现；击杀入账/赛道移除/波次推进由 Model 的 `DeathSettle` 权威帧定时器（400ms / 8 帧）驱动 |
+| 撑杆跳僵尸起跳 | 改为“中心沿移动方向 0.7 格判定线”起跳，固定飞 1.4 格，落地用 `GetPlantsInGrid` 补判 |
 
 `stopAttacking()` 必须成对维护：
 
@@ -224,9 +226,13 @@ Entity 只提供 `playWardenLand()` 等表现入口。
 
 代码：`src/game/presets/monster/zombie/zombie.ts`、`cap_zombie.ts`、`helmet_zombie.ts`、`turtle_zombie.ts`。
 
+继承链已统一为 `ZombieModel extends MediumMonsterModel`、`BaseZombieEntity extends MediumMonsterEntity`，潜水/海豚/木船僵尸均复用这条链：
+
 - 普通僵尸：`ZombieData` mid=1，HP300，weight 随波次衰减。Entity 只提供基础僵尸动画。
-- 帽子/钢盔/龟甲僵尸：Model 用 `withHelmetModel` 定义 `EquipmentDef` 与破碎钩子；Entity 用 `EquippedMonsterEntity` + `withHelmetEntity` 只渲染 sprite。旧的 `BaseZombieArmorEntity.createArmor()` 与 `MonsterModel.applyArmorDamage()` 已删除。
-- `damageThresholds` 写在 `MonsterDefinition.damageThresholds`，由 `PresetMonsterModel` 构造时写入 Model；Entity 只 `declare` 字段。血量下降时 `updateBodyDamageStage()` 调用动画切换。
+- 帽子/钢盔/龟甲僵尸：Model 用 `withHelmetModel` 定义 `EquipmentDef`（静态配置，不进快照）与破碎钩子；Entity 用 `EquippedMonsterEntity` + `withHelmetEntity` 只渲染 sprite。旧的 `BaseZombieArmorEntity.createArmor()` 与 `MonsterModel.applyArmorDamage()` 已删除。
+- `damageThresholds` 写在 `MonsterDefinition.damageThresholds`（只读 config）；Entity 只 `declare` 字段。血量下降时 `updateBodyDamageStage()` 调用动画切换。
+- 伤害公式：`getAttackDamage()` = `baseAttackDamage`（空手）+ 主手 `weaponDamage`；矿工 20+40=60、卫道士 20+12=32。旧的 `attackDamage` 字段不存在。
+- 龟壳弓手破壳 buff 带防重复标记，并立即同步移动速度。
 
 新增同类怪物时，通常只需定义 Data、装备 Def 和动画控制器；通用攻击/受伤逻辑已经在 Model。
 
@@ -317,28 +323,65 @@ Warden / ObsidianGolem 通过扩展 Model 覆写 `skill1/skill2` 和新增事件
 
 所有延迟都通过 Model timer；Entity 的 `startArcReposition()` 只在动画回调里通知 Model 完成。
 
+<a id="mob-water-air"></a>
+
+## 11. 第二章新增怪物（mid 19~28）
+
+### 飞行 / 空中单位
+
+| mid | nameKey | 机制 |
+| --- | --- | --- |
+| 19 | `BalloonZombie` | 气球僵尸，`isDefaultFlying:true`、载具血 1；bullet 被载具吸收，laser/explosion 穿透；气球破碎后 `flying=false` 落地 |
+| 20 | `BalloonCapZombie` | 气球皮革帽僵尸，飞行 + 帽子护甲 |
+| 21 | `BalloonTntClone` | 气球TNT分身，PLANT 阵营飞行单位（由 pid 20 星碎召唤），200 血；`couldCarryStarShards:false`，接触首个僵尸或按移动方向最后一格爆炸 |
+
+飞行僵尸统一继承 `FlyingMonsterModel` / `FlyingMonsterEntity`：载具血条、bullet 吸收、laser/explosion 穿透、落地补判脚下植物。动画 `FlyingZombieAnim` 让气球在上、僵尸整体旋转 90° 悬吊。
+
+### 水路单位
+
+| mid | nameKey | 机制 |
+| --- | --- | --- |
+| 22~26 | `BoatZombie` 等 5 种 | 木船僵尸：坐骑血 400、`mountDamagePriority="rider"`、`habitats=["water"]`；船图层由 `boatMounted || 水行` 挂载，坐姿 60° 方向相关 |
+| 27 | `DivingZombie` | 潜水僵尸：`tiny` 在 Model 内切换（潜行为 true、攻击探出为 false），面罩挂点 + 波纹效果；`canDrown:false`；tiny 雪球命中链路 |
+| 28 | `DolphinRiderZombie` | 海豚骑乘僵尸：海豚坐骑血 250、`mountDamagePriority="mount"`（坐骑优先扣血）、`habitats=["water"]`；破碎后速度回退普通僵尸 |
+
+水路单位都依赖 `TerrainHabitat.canSpawnMonsterInRow()` 按水面占比过滤刷怪行；坐骑被打碎后骑手暴露在水上会触发环境溺亡 `applyMonsterDrowning()`（每逻辑帧扣 5% 最大生命，`flying/inVoid/非 water 行` 豁免）。
+
+### 坐骑伤害路由
+
+`MonsterModel.absorbMountDamage()` 统一处理，按 `hitKind` 与坐骑类型决定顺序：
+
+- `explosion`：先扣坐骑血量后返回 false，本体继续受伤。
+- `mount` 优先（海豚）：bullet/laser 由坐骑吸收，返回 true。
+- `rider` 优先（木船）：子弹先打骑手，坐骑后扣。
+- 破碎 `breakMount()` 由 Model 决定速度回退与 `flying=false` 等后果，Entity 只播放视图。
+
 <a id="mob-special"></a>
 
-## 11. 特殊交互清单
+## 12. 特殊交互清单
 
 | 交互 | 处理位置 | 说明 |
 | --- | --- | --- |
-| 目标优先级 | `PlantHelper.IsMorePriorityPlant()` | 见 [植物优先级](./1_plant.md#plant-priority) |
-| 目标死亡 | `PlantEntity.destroy()` → `underAttackBy` | 自动让攻击者停攻 |
-| 星碎掉落 | `MonsterModel.dropCarriedStarShards()` | `starShardsDropped` 进快照防重复 |
-| 护甲 / 盾牌 / 武器 | `Equipment.ts` 的 helmet / shield / weapon mixin | Model 定义数值与破碎规则；Entity 只渲染 |
-| 装备回滚 | Model 字段 + `syncViewFromModel()` | 恢复 sprite 可见性、frame、挥动状态 |
-| Boss PRNG | Entity PRNG + `MONSTER_PRNG_FIELDS` | 先播种再快照 |
-| Boss 召唤 | `generateBossWaveScript` + `pendingSpawns` | 状态进 Model 快照 |
+| 目标优先级 | `MonsterModel.attackTargetRank()` | 显式全序：`护盾0 > 粉尘1 > 普通2 > 承载物3`，pid/SnapshotId 兜底；见 [植物目标选择](./1_plant.md#plant-priority) |
+| 目标死亡接力 | `onAttackTargetDestroyed()` → `pickContactTarget()` → `retargetAttack()` | 换目标不重建攻击定时器；timer 按事件名 `removeByEvent` 兜底 |
+| 星碎掉落 | `MonsterModel.dropCarriedStarShards()` | `starShardsDropped` 进快照防重复；mid 17/18/21 不携带星碎 |
+| 护甲 / 盾牌 / 武器 / 坐骑 | `Equipment.ts` mixin + `MonsterModel.absorbMountDamage()` | Model 定义数值与破碎规则；坐骑按 `hitKind` 和 `mountDamagePriority` 路由；Entity 只渲染 |
+| 装备回滚 | Model 字段 + `syncViewFromModel()` | 恢复 sprite 可见性、frame、挥动状态；static `EquipmentDef` 不进快照 |
+| buff/debuff | `MonsterModel.applyBuff()` + `Buffs.ts` | 到期帧进快照；`frozen` 到期链 `slow`；黑曜石傀儡/监守者/蜈蚣免疫 |
+| 环境溺亡 | `Drowning.applyMonsterDrowning()` | 非水行、坐骑破碎后每帧扣 5% 最大生命；`canDrown:false` 的怪物豁免 |
+| Boss PRNG | Entity PRNG + `MONSTER_PRNG_FIELDS` | 先播种再快照；`DeterministicRandom` 包装器保证 `state()` 可读写 |
+| Boss 召唤 | `generateBossWaveScript` + `pendingSpawns` + `MobSpawnIdentity` | 状态进 Model 快照；出怪/召唤统一在 defer 前分配 `spawnSeq + mobSnapshotId` |
 
-## 12. 检查清单
+## 13. 检查清单
 
-- [ ] 数值、装备配置和技能决策在 Model。
+- [ ] 数值、装备配置和技能决策在 Model；static config 用 `sealMonsterConfig()` 迁入非枚举 config。
 - [ ] Entity 只暴露动画/视图能力，不持有 `attackTween` / `createArmor`。
-- [ ] 装备状态用 helmet / shield / weapon mixin，破损与溢出伤害由 Model 决定。
-- [ ] 攻击 timer 是 `MonsterAttack`，不是 Entity 闭包。
-- [ ] 转移目标走 `MonsterModel.tryStartAttack()`。
-- [ ] 停攻时清理 `underAttackBy`、`attackTimer`、`isStop`。
+- [ ] 装备状态用 helmet / shield / weapon mixin，破损与溢出伤害由 Model 决定；伤害公式用 `getAttackDamage()`。
+- [ ] 攻击 timer 是 `MonsterAttack`，不用 `addEvent({ callback })`；停止时按事件名 `removeByEvent` 兜底。
+- [ ] 同格目标选择走 `attackTargetRank()` 全序，不折叠 `PlantsMap` 数组。
+- [ ] 目标销毁由 `retargetAttack()` 接力，换目标不重建攻击定时器。
 - [ ] 新增技能事件加入 `tickEventNames`。
+- [ ] buff/debuff 走 Model 到期帧，免疫标记写在 `MonsterDefinition.buffImmune`。
+- [ ] 涉及命中层级时用 `canReachBody()`，不写裸 `if (isFlying)`。
 - [ ] Boss 的随机源和召唤队列可回滚。
 - [ ] 需要在 rebuild 中识别的实体有稳定 key。
