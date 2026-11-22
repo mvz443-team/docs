@@ -240,7 +240,9 @@ PlantHelper.GetPlantsInGrid(col,row)
 | pointer=down | 优先护盾 |
 | pointer=up | 优先非护盾、非承载物 |
 
-种植侧兼容规则在 `PlantHelper.CanPlantInGrid()`：高级植物基座关系 `11→9`、`14→1`，以及 GROUND_ONLY / WATER_ONLY / SKY_ONLY / POWDER / carrier 冲突。
+种植侧规则在 `PlantHelper.CanPlantInGrid()`：地块白名单读 `allowedPlantSlots`，基座关系读 `requiredBasePid`（当前南瓜头·晚上 `11 → 阴森南瓜头 9`、反坦克分发器 `14 → 发射器 1`），叠种读 `placementRule` / `stackRole`；一次性植物由 `isOneTimePlant` + `applyInstantEffect()` 在同一确定性帧结算，不创建 Entity / 物理体。
+
+高级植物替换基座时，无论昼夜与默认睡眠规则，都会继承基座植物的 `isSleeping` 状态（通过 `PlantCmd.SetSleeping` 延迟应用）。替换逻辑集中在 `PlantHelper.CreateEntityWithBaseReplacement()`：只销毁 `requiredBasePid` 指定的那一株，同格睡莲/护盾等其他植物不受影响；先创建新植物再销毁基座，便于正在啃咬的怪物在同一帧重新选目标。preset 的 `createEntity` 不再各自处理基座。
 
 <a id="plant-case-dispenser"></a>
 
