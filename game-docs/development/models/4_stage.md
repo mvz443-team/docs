@@ -2,13 +2,16 @@
 
 <a id="stage-data"></a>
 
-> 适用代码：`src/types/stage.ts`、`public/stages/levels/ch*.json`、`src/game/utils/helper/StageHelper.ts`、`src/game/managers/combat/MobManager.ts`、`PresetEventManager.ts`、`GridManager.ts`
+> 适用代码：`src/types/stage.ts`、`src/game/stages/**`、`src/game/utils/helper/StageHelper.ts`、`src/game/managers/combat/MobManager.ts`、`PresetEventManager.ts`、`GridManager.ts`
 >
 > 相关阅读：[Manager 职责](../kit/1_manager.md#2-核心-manager-速查)、[僵尸 preset 的长度与权重](../presets/2_mob.md#mob-overview)、[回滚状态源](./3_rollback_and_sync.md#rollback-state-layout)
 
 ## 1. 关卡数据从哪里来
 
-`Game.create()` 从缓存读取 `ch${level}` JSON，得到 `StageData`。
+关卡配置已从 JSON 迁到 `src/game/stages/chapter1/stageN.ts`，每关一个模块，导出
+`{ metadata, content: StageData, script: LevelScript }`。`Preloader` 通过
+`StageLibrary.load(stageId)` 懒加载（每关独立 chunk），再把 `content` 写入 Phaser 缓存
+`ch${level}` 供 `Game.create()` 读取；关卡列表等 UI 只读同步的轻量元数据。
 
 核心类型：
 
@@ -39,7 +42,7 @@ interface Wave {
 }
 ```
 
-真实关卡文件位于 `public/stages/levels/ch1.json` 到 `ch9.json`。`ch1.json` 的示例配置包含 12 波、白天开局、水道行 `[1,2,3]`、允许怪物 `[1,2,3,8]`。
+真实关卡模块位于 `src/game/stages/chapter1/stage1.ts` 到 `stage9.ts`。`stage1.ts` 的配置包含 12 波、白天开局、前 3 波刷怪行白名单 `[0,4]`、允许怪物 `[1,2,3,8]`。关卡特有逻辑（赠送植物、初始水路、波次事件）写在同文件的 `script: LevelScript` 里，由 `PresetEventManager` 通过 `LevelScriptContext` 通用调度，管理器不再按 `stageId` 分支。
 
 <a id="stage-generation"></a>
 
