@@ -22,7 +22,6 @@ interface StageScript {
   phase2_end: number;
   dayOrNight: number;       // 1=白天开局，2=夜晚开局
   flagWaves: number[];
-  waterWays: number[];
   AllowedMobs: number[];
   globalRatio: number;
   bossInsert: unknown[];
